@@ -1,0 +1,15 @@
+{
+  "game": "Название, build игры",
+  "scene": "Сохранение, маршрут, одинаковая длительность, warm-up",
+  "graphics": "1280x800; preset; все изменённые опции; без изменения между A и B",
+  "fps_cap": "40; limiter Steam/Gamescope, VSync",
+  "refresh_hz": "LCD 60 / OLED 80 — указать фактическую",
+  "power_mode": "Батарея; Steam TDP 10 W; GPU auto; профиль Bosun; другие менеджеры выключены",
+  "brightness": "50%; HDR off; одинаковые Wi-Fi/Bluetooth/аудио",
+  "proton": "Версия Proton и launch options",
+  "starting_battery_percent": "70",
+  "starting_temperature_c": "60",
+  "mode": "Gaming Mode / Desktop Mode",
+  "storage": "SSD / microSD, модель",
+  "notes": "Используйте отдельные файлы A1, B1, B2, A2; значения выше заменить фактическими"
+}

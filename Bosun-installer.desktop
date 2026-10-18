@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Install or update Bosun
+Comment=Steam Deck performance per watt
+Icon=steamdeck-gaming-return
+Terminal=true
+StartupNotify=false
+Categories=Game;Settings;
+Exec="/usr/bin/bash" "-c" "set -eu; trap 'r=\\$?; echo; echo \\"Bosun installer finished (status \\$r). Press Enter to close.\\"; read -r answer || true' EXIT; t=\\$(mktemp /tmp/bosun-installer-XXXXXX.py); trap 'r=\\$?; rm -f -- \\"\\$t\\"; echo; echo \\"Bosun installer finished (status \\$r). Press Enter to close.\\"; read -r answer || true' EXIT; curl --fail --location --proto '=https' --proto-redir '=https' --connect-timeout 20 --max-time 120 --output \\"\\$t\\" https://raw.githubusercontent.com/ISAIandCO/Bosun/main/install.py; python3 \\"\\$t\\""

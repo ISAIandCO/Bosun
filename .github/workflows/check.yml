@@ -1,0 +1,29 @@
+name: Check Bosun
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python3 -m py_compile bosun.py install.py bosun/*.py
+      - run: sudo "$(command -v python3)" -m unittest discover -s tests -v
+      - name: Validate desktop launcher and systemd units
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y desktop-file-utils
+          desktop-file-validate Bosun-installer.desktop
+          python3 - <<'PY'
+          import install
+          from pathlib import Path
+          for path, text in install.unit_files().items():
+              Path('/tmp/' + Path(path).name).write_text(text)
+          PY
+          systemd-analyze verify /tmp/bosun-restore.service /tmp/bosun-resume.service /tmp/bosun-session.service /tmp/bosun-session.path
