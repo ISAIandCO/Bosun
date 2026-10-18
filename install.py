@@ -18,15 +18,21 @@ import urllib.request
 REPO = 'ISAIandCO/Bosun'
 APP = Path('/home/.bosun/app')
 BASE = APP.parent
-FILES = ['bosun.py', 'bosun/__init__.py', 'bosun/core.py', 'bosun/measure.py',
-         'install.py', 'README.md', 'LICENSE', 'docs/tweaks.md', 'docs/testing.md', 'docs/benchmark-metadata.json']
+FILES = ['bosun.py', 'bosun/__init__.py', 'bosun/core.py', 'bosun/measure.py', 'bosun/sessions.py', 'bosun/control.py', 'bosun/dependencies.py',
+         'install.py', 'README.md', 'LICENSE', 'docs/tweaks.md', 'docs/testing.md', 'docs/benchmark-metadata.json', 'docs/hardware-and-tweaks.md',
+         'decky/main.py', 'decky/plugin.json', 'decky/package.json', 'decky/dist/index.js',
+         'decky/NOTICE', 'decky/LICENSES/Decky-LGPL-2.1.txt',
+         'decky/third-party/loader-api/src/index.ts', 'decky/third-party/loader-api/src/types.ts',
+         'decky/third-party/loader-api/src/types.d.ts', 'decky/third-party/loader-api/package.json']
 
 
-def download():
+def download(revision=None):
     headers = {'User-Agent': 'Bosun-installer', 'Accept': 'application/vnd.github+json'}
-    req = urllib.request.Request(f'https://api.github.com/repos/{REPO}/commits/main', headers=headers)
-    with urllib.request.urlopen(req, timeout=30) as response:
-        sha = json.load(response)['sha']
+    sha = revision
+    if sha is None:
+        req = urllib.request.Request(f'https://api.github.com/repos/{REPO}/commits/main', headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as response:
+            sha = json.load(response)['sha']
     if len(sha) != 40 or any(c not in '0123456789abcdef' for c in sha):
         raise RuntimeError('Invalid GitHub commit ID')
     req = urllib.request.Request(f'https://api.github.com/repos/{REPO}/tarball/{sha}', headers=headers)
@@ -61,7 +67,7 @@ def desktop_exec(args):
             if char in '\\"`$':
                 out += '\\'
             out += char
-        return (out + '"').replace('\\', '\\\\')
+        return (out + '"').replace('\\', '\\\\').replace('\n', '\\n').replace('\t', '\\t')
     return ' '.join(quote(arg) for arg in args)
 
 
@@ -94,7 +100,7 @@ def unit_files():
     }
 
 
-def install(source, username):
+def install(source, username, decky_enabled=True):
     sys.path.insert(0, str(source))
     from bosun.core import System, atomic
     system = System()
@@ -133,6 +139,16 @@ def install(source, username):
     with (BASE / 'state/lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         system.restore_readonly()
+        if decky_enabled:
+            from bosun.dependencies import ensure_decky
+            homebrew, messages = ensure_decky(system, user)
+            print('\n'.join(messages))
+            for rel in ['main.py', 'plugin.json', 'package.json', 'dist/index.js', 'NOTICE', 'LICENSES/Decky-LGPL-2.1.txt', 'third-party/loader-api/src/index.ts', 'third-party/loader-api/src/types.ts', 'third-party/loader-api/src/types.d.ts', 'third-party/loader-api/package.json']:
+                file = str(homebrew / 'plugins/Bosun' / rel)
+                p = Path(file)
+                if p.is_symlink() or (p.exists() and digest(p) != manifest['files'].get(file)):
+                    raise RuntimeError('Decky plugin file changed externally: ' + file)
+                content[file] = (source / 'decky' / rel).read_text()
         previous = BASE / 'previous'
         nextdir = BASE / 'next'
         if nextdir.exists():
@@ -166,9 +182,10 @@ def install(source, username):
                         break
                     os.chown(parent, user.pw_uid, user.pw_gid)
             system.command('systemctl', 'daemon-reload')
-            system.command('systemctl', 'enable', 'bosun-restore.service', 'bosun-resume.service', 'bosun-session.path')
+            with system.writable():
+                system.command('systemctl', 'enable', 'bosun-restore.service', 'bosun-resume.service', 'bosun-session.path')
             system.command('systemctl', 'start', 'bosun-session.path')
-            atomic(manifestfile, json.dumps({'user': username, 'files': {f: digest(Path(f)) for f in content}}, indent=2))
+            atomic(manifestfile, json.dumps({'user': username, 'files': {**manifest['files'], **{f: digest(Path(f)) for f in content}}}, indent=2))
         except BaseException:
             if swapped:
                 shutil.rmtree(APP)
@@ -187,6 +204,8 @@ def install(source, username):
                 system.command('systemctl', 'stop', 'bosun-session.path', check=False)
             system.command('systemctl', 'daemon-reload', check=False)
             raise
+    if decky_enabled:
+        ensure_decky(system, user, start=True)
     print('Bosun installed. Open Desktop/Bosun.desktop or ~/.local/bin/bosun. No tuning applied by installation.')
 
 
@@ -200,18 +219,30 @@ def uninstall():
         print('\n'.join(notes))
         if conflict or engine.state['entries']:
             raise RuntimeError('Rollback has conflicts. Resolve them before uninstall; application retained.')
+        # Decky's unload callback must not restore the pre-game profile after uninstall.
+        engine.state.pop('session', None)
+        engine.save()
+        from bosun.control import Control
+        control = Control(system)
+        config = control.config()
+        config['automatic'] = False
+        control.write_config(config)
         manifest = json.loads((BASE / 'install.json').read_text())
         conflicts = [file for file, sha in manifest['files'].items() if Path(file).exists() and digest(Path(file)) != sha]
         if conflicts:
             raise RuntimeError('Installer files changed externally; retained: ' + ', '.join(conflicts))
-        system.command('systemctl', 'disable', 'bosun-restore.service', 'bosun-resume.service', 'bosun-session.path')
+        with system.writable():
+            system.command('systemctl', 'disable', 'bosun-restore.service', 'bosun-resume.service', 'bosun-session.path')
         system.command('systemctl', 'stop', 'bosun-session.path')
         with system.writable():
             for file in manifest['files']:
                 Path(file).unlink(missing_ok=True)
         system.command('systemctl', 'daemon-reload')
         shutil.rmtree(APP)
+        had_plugin = any('/plugins/Bosun/' in f for f in manifest['files'])
         (BASE / 'install.json').unlink()
+    if had_plugin:
+        system.command('systemctl', 'restart', 'plugin_loader.service', check=False, timeout=60)
     print('Bosun removed. Original tuning restored where owned; journal/recovery copy retained in /home/.bosun/state. Reboot if boot settings changed.')
 
 
@@ -221,6 +252,7 @@ def main():
     p.add_argument('--user', default=os.environ.get('SUDO_USER') or os.environ.get('USER'))
     p.add_argument('--update', action='store_true')
     p.add_argument('--uninstall', action='store_true')
+    p.add_argument('--no-decky', action='store_true', help='Skip Decky install/update; an existing Bosun plugin is retained')
     args = p.parse_args()
     temp = None
     if args.uninstall:
@@ -236,9 +268,17 @@ def main():
         else:
             temp, source = download()
     try:
-        if os.geteuid() != 0:
-            return subprocess.call(['sudo', '--', '/usr/bin/python3', str(source / 'install.py'), '--source', str(source), '--user', args.user])
-        install(source, args.user)
+        if any(not (source / file).is_file() for file in FILES):
+            # A pre-0.2 downloader extracted its older file list. Obtain the new files
+            # from that same commit, never mix the staged update with a newer main.
+            if not (source / 'COMMIT').is_file():
+                raise RuntimeError('Incomplete installation source; rerun the current desktop installer')
+            revision = (source / 'COMMIT').read_text().strip()
+            temp, source = download(revision=revision)
+        if os.geteuid() != 0 or (source / 'install.py').resolve() != Path(__file__).resolve():
+            prefix = ['sudo', '--'] if os.geteuid() != 0 else []
+            return subprocess.call([*prefix, '/usr/bin/python3', str(source / 'install.py'), '--source', str(source), '--user', args.user, *(['--no-decky'] if args.no_decky else [])])
+        install(source, args.user, decky_enabled=not args.no_decky)
     finally:
         if temp:
             temp.cleanup()

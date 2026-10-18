@@ -13,8 +13,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: python3 -m py_compile bosun.py install.py bosun/*.py
+      - run: python3 -m py_compile bosun.py install.py bosun/*.py decky/main.py
       - run: sudo "$(command -v python3)" -m unittest discover -s tests -v
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: decky/package-lock.json
+      - run: npm --prefix decky ci --ignore-scripts --no-audit --no-fund
+      - run: npm --prefix decky run check
+      - run: node --test decky/tests/events.test.cjs
+      - run: npm --prefix decky run build
+      - run: git diff --exit-code -- decky/dist/index.js
       - name: Validate desktop launcher and systemd units
         run: |
           sudo apt-get update -qq

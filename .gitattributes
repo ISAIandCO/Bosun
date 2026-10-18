@@ -1,0 +1,2 @@
+# Preserve upstream LGPL source verbatim, including its comment whitespace.
+decky/third-party/** -whitespace

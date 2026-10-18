@@ -539,13 +539,13 @@ class InstallerTests(unittest.TestCase):
 
     def test_install_update_uninstall_no_system_packages(self):
         with self.environment() as (source, home, base, units):
-            installer.install(source, 'deck')
+            installer.install(source, 'deck', decky_enabled=False)
             self.assertTrue((base / 'app/bosun.py').exists())
             self.assertTrue((home / 'Desktop/Bosun.desktop').exists())
             self.assertFalse((base / 'state/state.json').exists())
             (base / 'state/profiles').mkdir()
             (base / 'state/profiles/retained.json').write_text('{}')
-            installer.install(source, 'deck')
+            installer.install(source, 'deck', decky_enabled=False)
             self.assertTrue((base / 'state/profiles/retained.json').exists())
             installer.uninstall()
             self.assertFalse((base / 'app').exists())
@@ -560,12 +560,12 @@ class InstallerTests(unittest.TestCase):
             p.parent.mkdir()
             p.write_text('user file')
             with self.assertRaises(RuntimeError):
-                installer.install(source, 'deck')
+                installer.install(source, 'deck', decky_enabled=False)
             self.assertEqual(p.read_text(), 'user file')
 
     def test_failed_update_restores_application_and_files(self):
         with self.environment() as (source, home, base, units):
-            installer.install(source, 'deck')
+            installer.install(source, 'deck', decky_enabled=False)
             (base / 'app/COMMIT').write_text('previous code')
             original = (home / 'Desktop/Bosun.desktop').read_text()
             mode = (home / 'Desktop/Bosun.desktop').stat().st_mode
@@ -575,7 +575,7 @@ class InstallerTests(unittest.TestCase):
                     raise BosunError('simulated enable failure')
                 return real(*args, **kwargs)
             with patch.object(self.s, 'command', fail), self.assertRaises(BosunError):
-                installer.install(source, 'deck')
+                installer.install(source, 'deck', decky_enabled=False)
             self.assertEqual((base / 'app/COMMIT').read_text(), 'previous code')
             self.assertEqual((home / 'Desktop/Bosun.desktop').read_text(), original)
             self.assertEqual((home / 'Desktop/Bosun.desktop').stat().st_mode, mode)

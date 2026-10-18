@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Capability-gated SteamOS tuning. No package manager, polling, or shell input."""
+"""Capability-gated SteamOS tuning with journalled changes and no polling or shell input."""
 import contextlib
 import dataclasses
+import errno
 import fcntl
 import hashlib
 import json
@@ -13,10 +14,11 @@ import subprocess
 import tempfile
 import time
 
-VERSION = '0.1.0'
+VERSION = '0.2.0'
 APP = '/home/.bosun/app'
 STATE = '/home/.bosun/state'
 BOOT = '/etc/default/grub.d/zz-bosun.cfg'
+ZRAM = '/etc/systemd/zram-generator.conf.d/90-bosun.conf'
 POWER = {'governor', 'epp', 'boost', 'smt', 'cpu_max_mhz', 'tdp_w', 'gpu_mode'}
 RECOMMENDED = {
     'mitigations': 'off', 'nmi_watchdog': 0, 'zram_page_cluster': 0,
@@ -44,12 +46,18 @@ CATALOG = {
     'boost': ('0|1', 'Per-game CPU boost; disabling can free APU budget, can hurt CPU-bound games.'),
     'smt': ('on|off', 'Experimental CPU topology; can hurt threaded games. Never forceoff.'),
     'cpu_max_mhz': ('400..3500', 'Per-game CPU ceiling; trades CPU throughput for APU budget.'),
-    'tdp_w': ('3..15', 'Per-game APU cap in watts, NOT total battery power.'),
+    'tdp_w': ('4..15', 'Per-game APU cap in watts, NOT total battery power.'),
     'gpu_mode': ('auto|low|high', 'AMDGPU dynamic clock policy; low/high may badly redistribute budget.'),
     'nvme_scheduler': ('available scheduler', 'Experimental storage latency/throughput tradeoff.'),
     'sd_scheduler': ('available scheduler', 'Experimental microSD scheduler; detected by device type.'),
     'moverate': ('8..1024', 'Experimental boot AMDGPU migration rate MB/s; version-dependent.'),
-    'lbpw': ('-1|0|1', 'Experimental boot load balancing per watt; 0 may INCREASE power.'),
+    'lbpw': ('-1|0|1', 'Legacy compatibility key; skipped on Deck RDNA2 because upstream LBPW is GFX9-specific.'),
+    'compaction_proactiveness': ('0..100', 'Experimental background memory compaction; 0 removes proactive work but may increase fragmentation.'),
+    'nvme_readahead_kb': ('0..4096', 'Experimental NVMe read-ahead; loading/streaming vs unnecessary reads.'),
+    'sd_readahead_kb': ('0..4096', 'Experimental SD read-ahead; storage workload-specific.'),
+    'zram_algorithm': ('lz4|lzo-rle|zstd', 'Reboot-only compressor override; never live swapoff.'),
+    'zram_size_percent': ('25..200', 'Reboot-only virtual zram capacity as percent of RAM, not RAM reservation.'),
+    'workqueue_power_efficient': ('0|1', 'Experimental boot WQ_POWER_EFFICIENT consolidation; may trade latency for fewer wakeups.'),
     'lavd': ('autopilot', 'Experimental installed scx_lavd; kernel/BTF required, no other scx owner.'),
 }
 
@@ -184,6 +192,7 @@ class System:
                 'amdgpu': {k: self.read('/sys/module/amdgpu/parameters/' + k) for k in ['moverate', 'lbpw']},
                 'runtime': {p: self.read(p) for p in [
                     '/proc/sys/kernel/nmi_watchdog', '/proc/sys/vm/page-cluster', '/proc/sys/vm/swappiness',
+                    '/proc/sys/vm/compaction_proactiveness', '/sys/module/workqueue/parameters/power_efficient',
                     '/sys/kernel/mm/lru_gen/enabled', '/sys/kernel/mm/transparent_hugepage/enabled',
                     '/sys/kernel/mm/transparent_hugepage/defrag', '/sys/devices/system/cpu/smt/control',
                     '/sys/devices/system/cpu/cpufreq/boost']},
@@ -191,8 +200,14 @@ class System:
                     '/sys/class/drm/card[0-9]*/device/power_dpm_force_performance_level',
                     '/sys/class/drm/card[0-9]*/device/pp_dpm_sclk',
                     '/sys/class/drm/card[0-9]*/device/uevent'] for p in self.glob(pattern)},
-                'storage': {p: self.read(p) for p in self.glob('/sys/block/*/queue/scheduler')},
+                'storage': {p: self.read(p) for pattern in ['/sys/block/*/queue/scheduler', '/sys/block/*/queue/read_ahead_kb'] for p in self.glob(pattern)},
+                'zram': {p: self.read(p) for pattern in ['/sys/block/zram*/comp_algorithm', '/sys/block/zram*/disksize', '/sys/block/zram*/mm_stat'] for p in self.glob(pattern)},
                 'power_caps_uw': {p: self.read(p) for p in self.glob('/sys/class/hwmon/hwmon*/power[12]_cap')},
+                'model_specs': {'cpu': 'Zen 2 4c/8t', 'gpu': '8 RDNA2 CUs, up to 1600 MHz',
+                    'apu_nm': 6 if model == 'OLED' else 7 if model == 'LCD' else None,
+                    'ram_gb': 16, 'ram_mt_s': 6400 if model == 'OLED' else 5500 if model == 'LCD' else None,
+                    'battery_design_wh': 50 if model == 'OLED' else 40 if model == 'LCD' else None,
+                    'panel_max_hz': 90 if model == 'OLED' else 60 if model == 'LCD' else None, 'apu_range_w': [4, 15]},
                 'cpu_vulnerabilities': {p: self.read(p) for p in self.glob('/sys/devices/system/cpu/vulnerabilities/*')},
                 'readonly': self.command('steamos-readonly', 'status', check=False) if self.which('steamos-readonly') else 'unavailable'}
 
@@ -309,11 +324,13 @@ def validate(settings):
     if not isinstance(settings, dict):
         raise BosunError('Profile settings must be an object')
     bounds = {'nmi_watchdog': (0, 1), 'zram_page_cluster': (0, 3), 'swappiness': (0, 200),
-              'boost': (0, 1), 'cpu_max_mhz': (400, 3500), 'tdp_w': (3, 15),
-              'moverate': (8, 1024), 'lbpw': (-1, 1)}
+              'boost': (0, 1), 'cpu_max_mhz': (400, 3500), 'tdp_w': (4, 15),
+              'moverate': (8, 1024), 'lbpw': (-1, 1), 'compaction_proactiveness': (0, 100),
+              'nvme_readahead_kb': (0, 4096), 'sd_readahead_kb': (0, 4096),
+              'zram_size_percent': (25, 200), 'workqueue_power_efficient': (0, 1)}
     enums = {'mitigations': ['off'], 'mglru': ['on', 'off'], 'smt': ['on', 'off'],
              'gpu_mode': ['auto', 'low', 'high'], 'lavd': ['autopilot'],
-             'thp': ['always', 'madvise', 'never'],
+             'thp': ['always', 'madvise', 'never'], 'zram_algorithm': ['lz4', 'lzo-rle', 'zstd'],
              'thp_defrag': ['always', 'defer', 'defer+madvise', 'madvise', 'never']}
     for key, value in settings.items():
         if key not in CATALOG:
@@ -362,7 +379,16 @@ def plan(system, settings, managed=()):
         if key in POWER and conflicts:
             skipped.append(f'{key}: another power manager detected: {", ".join(conflicts)}; disable it for Bosun power profiles')
             continue
-        if key in {'mitigations', 'moverate', 'lbpw'}:
+        if key in {'mitigations', 'moverate', 'lbpw', 'workqueue_power_efficient'}:
+            if key == 'lbpw':
+                skipped.append('lbpw: upstream implementation is limited to GFX9 IPs; Steam Deck LCD/OLED use RDNA2, so this tweak is not applied')
+                continue
+            if key == 'workqueue_power_efficient':
+                if system.path('/sys/module/workqueue/parameters/power_efficient').exists():
+                    bootargs.append('workqueue.power_efficient=' + str(value))
+                else:
+                    skipped.append('workqueue_power_efficient: kernel interface unavailable')
+                continue
             if key != 'mitigations' and system.read('/sys/module/amdgpu/parameters/' + key) is None:
                 skipped.append(f'{key}: amdgpu parameter not exported by this kernel')
                 continue
@@ -374,6 +400,10 @@ def plan(system, settings, managed=()):
                 skipped.append(f'{key}: highest-priority active swap is not exclusively zram')
             else:
                 add(key, '/proc/sys/vm/' + ('page-cluster' if key == 'zram_page_cluster' else key), value)
+        elif key == 'compaction_proactiveness':
+            add(key, '/proc/sys/vm/compaction_proactiveness', value)
+        elif key in {'zram_algorithm', 'zram_size_percent'}:
+            continue  # one consolidated reboot-only generator override below
         elif key == 'mglru':
             path = '/sys/kernel/mm/lru_gen/enabled'
             raw = system.read(path)
@@ -394,6 +424,9 @@ def plan(system, settings, managed=()):
                 skipped.append(f'{key}: no cpufreq policy')
             for p in policies:
                 if key == 'governor':
+                    if value == 'powersave' and 'epp' in settings and system.read(p + '/scaling_driver') not in {'amd-pstate-epp', 'amd_pstate_epp'}:
+                        skipped.append(f'governor: {p} EPP profile requires active amd-pstate-epp; legacy powersave would force low clocks')
+                        continue
                     add(key, p + '/scaling_governor', value, system.read(p + '/scaling_available_governors', '').split())
                 elif key == 'epp':
                     driver = system.read(p + '/scaling_driver', '')
@@ -425,7 +458,7 @@ def plan(system, settings, managed=()):
                 if system.read(base + '/name') not in {'amdgpu', 'steamdeck_hwmon', 'steamdeck'}:
                     continue
                 for path in system.glob(base + '/power[12]_cap'):
-                    lower = int(system.read(path + '_min', '3000000'))
+                    lower = int(system.read(path + '_min', '4000000'))
                     upper = min(15000000, int(system.read(path + '_max', '15000000')))
                     if lower <= value * 1000000 <= upper:
                         caps.append(path)
@@ -441,15 +474,16 @@ def plan(system, settings, managed=()):
                 skipped.append('gpu_mode: requires exactly one AMD GPU; disconnect eGPU')
             else:
                 add(key, cards[0] + '/power_dpm_force_performance_level', value)
-        elif key in {'nvme_scheduler', 'sd_scheduler'}:
-            paths = system.glob('/sys/block/' + ('nvme*n*' if key == 'nvme_scheduler' else 'mmcblk[0-9]') + '/queue/scheduler')
+        elif key in {'nvme_scheduler', 'sd_scheduler', 'nvme_readahead_kb', 'sd_readahead_kb'}:
+            paths = system.glob('/sys/block/' + ('nvme*n*' if key.startswith('nvme_') else 'mmcblk[0-9]') + '/queue/' + ('read_ahead_kb' if key.endswith('readahead_kb') else 'scheduler'))
             if not paths:
                 skipped.append(f'{key}: no matching storage device')
             for path in paths:
-                if key == 'sd_scheduler' and system.read(path.split('/queue/')[0] + '/device/type') != 'SD':
+                if key.startswith('sd_') and system.read(path.split('/queue/')[0] + '/device/type') != 'SD':
                     skipped.append(f'{key}: not an SD card: {path}')
                     continue
-                add(key, path, value, re.sub(r'[\[\]]', '', system.read(path, '')).split())
+                choices = () if key.endswith('readahead_kb') else re.sub(r'[\[\]]', '', system.read(path, '')).split()
+                add(key, path, value, choices)
         elif key == 'lavd':
             binpath = system.which('scx_lavd')
             own = 'service:bosun-lavd.service' in managed
@@ -470,7 +504,26 @@ def plan(system, settings, managed=()):
                 unit = '[Unit]\nDescription=Bosun experimental LAVD\n[Service]\nType=simple\nExecStart=' + binpath + ' --autopilot\nRestart=no\n'
                 changes.extend([Change(key, '/etc/systemd/system/bosun-lavd.service', unit, 'file'),
                                 Change(key, 'bosun-lavd.service', 'active', 'service')])
-    if bootargs:
+    if any(k in settings for k in ['zram_algorithm', 'zram_size_percent']):
+        generator = system.path('/usr/lib/systemd/system-generators/zram-generator').exists() or system.which('zram-generator')
+        active = any(row[0] == '/dev/zram0' for row in swaps)
+        generator_owner = system.command('systemctl', 'is-active', 'systemd-zram-setup@zram0.service', check=False) == 'active'
+        if not generator or not active or not generator_owner:
+            skipped.append('zram_config: requires generator-owned active /dev/zram0; existing swap implementation retained')
+        else:
+            text = '# Managed by Bosun; takes effect after reboot.\n[zram0]\n'
+            algorithm = settings.get('zram_algorithm')
+            available = re.sub(r'[\[\]]', '', system.read('/sys/block/zram0/comp_algorithm', '')).split()
+            if algorithm and algorithm not in available:
+                skipped.append(f'zram_algorithm: {algorithm} unavailable; available: {available}')
+            elif algorithm:
+                text += f'compression-algorithm = {algorithm}\n'
+            if 'zram_size_percent' in settings:
+                text += f"zram-size = ram * {settings['zram_size_percent']} / 100\n"
+            if 'compression-algorithm' in text or 'zram-size' in text:
+                changes.append(Change('zram_config', ZRAM, text, 'file'))
+    legacy_lbpw = 'lbpw' in settings and ('file:' + BOOT) in managed
+    if bootargs or legacy_lbpw:
         try:
             system.boot_target()
             changes.append(Change('boot', BOOT, boot_content(bootargs), 'file'))
@@ -556,19 +609,32 @@ class Engine:
                     change.put(self.sys, old)
                     raise
         else:
-            change.put(self.sys, value)
+            try:
+                change.put(self.sys, value)
+            except OSError as exc:
+                if exc.errno != errno.EROFS:
+                    raise
+                with self.sys.writable():
+                    change.put(self.sys, value)
 
     def apply(self, name, settings, dry=False, automatic=False):
         self.sys.check_device()
         if not dry:
             self.recover()
+        dependency_notes = []
+        if not dry and not automatic:
+            from .dependencies import ensure_for
+            dependency_notes = ensure_for(self.sys, settings)
         replay = settings
         if automatic:
             owned = {e['change']['key'] for e in self.state['entries'].values()}
             if 'boot' in owned:
-                owned.update({'mitigations', 'moverate', 'lbpw'})
+                owned.update({'mitigations', 'moverate', 'lbpw', 'workqueue_power_efficient'})
+            if 'zram_config' in owned:
+                owned.update({'zram_algorithm', 'zram_size_percent'})
             replay = {k: v for k, v in settings.items() if k in owned}
         changes, notes = plan(self.sys, replay, self.state['entries'])
+        notes[:0] = dependency_notes
         fingerprint = self.sys.fingerprint()
         rebooted = self.state['boot_id'] != self.sys.read('/proc/sys/kernel/random/boot_id', '')
         updated = self.state['fingerprint'] != fingerprint
@@ -576,8 +642,10 @@ class Engine:
             return ['SteamOS/kernel changed: automatic replay paused. Open Bosun, preview and apply to accept new baseline.'], True
         desired = {c.id: c for c in changes}
         requested = set(settings)
-        if requested.intersection({'mitigations', 'moverate', 'lbpw'}):
+        if requested.intersection({'mitigations', 'moverate', 'lbpw', 'workqueue_power_efficient'}):
             requested.add('boot')
+        if requested.intersection({'zram_algorithm', 'zram_size_percent'}):
+            requested.add('zram_config')
         if 'governor' in requested:
             requested.add('epp')
         entries = self.state['entries']
@@ -695,7 +763,7 @@ class Engine:
         except BaseException:
             self.recover()
             raise
-        if any(c.path == BOOT and before != after for c, before, after, _ in actions):
+        if any(c.path in {BOOT, ZRAM} and before != after for c, before, after, _ in actions):
             notes.append('REBOOT REQUIRED: boot settings change only after reboot (also after rollback).')
         return notes, any('CONFLICT ' in n for n in notes)
 
@@ -713,6 +781,10 @@ class Engine:
                 del self.state['entries'][ident]
         for item in keys:
             self.state['desired'].pop(item, None)
+            session = self.state.get('session')
+            if session:
+                session['previous']['desired'].pop(item, None)
+                session.get('settings', {}).pop(item, None)
         self.save()
         return removed
 

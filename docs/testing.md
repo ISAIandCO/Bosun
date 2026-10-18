@@ -2,11 +2,15 @@
 
 ## Фактически проверено
 
-Физический Steam Deck в среде разработки отсутствует. Ни прирост FPS, ни снижение мощности, ни аппаратная совместимость LCD/OLED не измерены. DMI-модели и sysfs-интерфейсы проверены на изолированных fixtures. Это проверка логики программы, а не эмуляция драйверов GPU/SMU или доказательство загрузки реальной SteamOS.
+В версии 0.2: 78 Python-тестов и 5 frontend event-тестов проходят локально; TypeScript проверен, Decky bundle собирается. Физический Steam Deck в среде разработки отсутствует. Ни прирост FPS, ни снижение мощности, ни аппаратная совместимость LCD/OLED не измерены. DMI-модели и sysfs-интерфейсы проверены на изолированных fixtures. Это проверка логики программы, а не эмуляция драйверов GPU/SMU или доказательство загрузки реальной SteamOS.
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m py_compile bosun.py install.py bosun/*.py
+python3 -m py_compile bosun.py install.py bosun/*.py decky/main.py
+npm --prefix decky ci --ignore-scripts
+npm --prefix decky run check
+npm --prefix decky run build
+node --test decky/tests/events.test.cjs
 ```
 
 Проверки охватывают preview без записи, реальные записи в изолированное дерево `/proc`/`sys`/`etc`/EFI, идемпотентность, точный откат исходных значений, отсутствие/неподдерживаемые параметры, LCD/OLED/неизвестную модель, swappiness с zram/disk swap, CPU/EPP/cap, TDP hardware bounds, GPU/SD policy, scheduler lifecycle, частичный сбой, journal recovery и его конфликт, загрузочный override, ошибку генератора, сохранение режима read-only, reboot/update baseline, resume без гонки со Steam, установку/обновление/удаление и game-session helper.
@@ -21,13 +25,14 @@ Boot generator/SMU/BPF в fixtures не исполняются. Shell-фрагм
 2. `bosun apply recommended --dry-run`: нет изменения sysctl/sysfs/GRUB. Посмотреть SKIP и UNCHANGED; не считать их применёнными твиками.
 3. Применить recommended, повторить. Проверить фактические значения. Перезагрузиться и проверить `/proc/cmdline`/CPU vulnerabilities, MGLRU, THP и zram page-cluster. Сверить прежний steamos-readonly status.
 4. Проверить `systemctl status bosun-restore.service bosun-resume.service bosun-session.path`. У path unit нет постоянно работающего Bosun-процесса. `journalctl -u bosun-restore -u bosun-resume -u bosun-session` показывает ошибки/пропуски.
-5. Создать runtime-only профиль игры с одним EPP/CPU cap, запустить через Steam wrapper в Gaming Mode. Перед игрой и после неё подтвердить apply/restore без запуска игры от root. Проверить нормальный выход, crash игры, SIGTERM wrapper; SIGKILL wrapper оставить для ручного recovery через token.
+5. В Decky назначить профиль запущенной игре и другой игре по AppID: проверить автоприменение/возврат при старте, выходе и смене, сохранность назначений после обновления. Сравнить эффект с CLI-launcher, не включая оба способа одновременно. Проверить кнопку синхронизации, один resume replay и сохранение неизвестных внешних значений. Затем создать runtime-only профиль игры с одним EPP/CPU cap, запустить через Steam wrapper в Gaming Mode. Перед игрой и после неё подтвердить apply/restore без запуска игры от root. Проверить нормальный выход, crash игры, SIGTERM wrapper; SIGKILL wrapper оставить для ручного recovery через token.
 6. Suspend/resume в Desktop и Gaming Mode; проверить, что статические параметры вернулись только при известном reset, а Steam power changes не затираются. Повторно применить power-профиль явно.
 7. Сменить Steam per-game TDP после применения Bosun TDP, запросить rollback. Ожидается конфликт с сохранением нового значения. `release tdp_w` должен оставить значение Steam; остальные параметры откатываются.
 8. Если есть LAVD, проверить attach через `/sys/kernel/sched_ext/state`, ops, ошибку несовместимого бинарника, sleep и откат. Отдельно проверить, что активный scx_loader/PowerTools не перехватывается.
 9. Полный rollback; reboot при загрузочных изменениях. Сравнить с сохранённым baseline. Не должно быть оставшегося override Bosun или изменённого режима read-only.
 10. На следующем обычном обновлении SteamOS проверить pause автоматического replay, preview и новое явное применение. Не обновлять/откатывать систему только ради этого теста.
-11. Uninstall должен сначала завершить rollback, а при внешнем конфликте сохранить приложение и объяснить причину. Проверить отсутствие активных Bosun units после удаления.
+11. Проверить автоматическую установку Decky при его отсутствии, сохранение чужих плагинов, загрузку официального бинарника/digest и появление интерфейса после возвращения в Gaming Mode. Проверить LAVD на устройстве без пакета: получение native provider, план без upgrades/downgrades и возврат RO при сетевой/пакетной ошибке.
+12. Uninstall должен сначала завершить rollback, а при внешнем конфликте сохранить приложение и объяснить причину. Проверить отсутствие активных Bosun units после удаления.
 
 ## Сопоставимый A/B-тест
 
