@@ -495,6 +495,23 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(conflict)
         self.assertEqual(self.s.read('/sys/class/hwmon/hwmon2/power1_cap'), '10000000')
 
+    def test_release_epp_keeps_foreign_value_through_later_rollback(self):
+        base = self.cpu()
+        self.apply({'governor': 'powersave', 'epp': 'balance_power'})
+        self.put(base + 'energy_performance_preference', 'power')
+        released = self.engine.release('epp')
+        self.assertIn(base + 'scaling_governor', released)
+        self.engine.apply('stock', {})
+        self.assertEqual(self.s.read(base + 'scaling_governor'), 'powersave')
+        self.assertEqual(self.s.read(base + 'energy_performance_preference'), 'power')
+
+    def test_removing_epp_restores_baseline_with_governor_retained(self):
+        base = self.cpu()
+        self.apply({'governor': 'powersave', 'epp': 'balance_power'})
+        self.apply({'governor': 'powersave'})
+        self.assertEqual(self.s.read(base + 'scaling_governor'), 'powersave')
+        self.assertEqual(self.s.read(base + 'energy_performance_preference'), 'performance')
+
 
 @unittest.skipUnless(os.geteuid() == 0, 'Installer fixture needs chown, never writes outside test root')
 class InstallerTests(unittest.TestCase):

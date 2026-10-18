@@ -481,7 +481,9 @@ def plan(system, settings, managed=()):
         for p in policies:
             raw = system.read(p + '/energy_performance_preference')
             if raw is not None and any(c.path == p + '/scaling_governor' for c in changes):
-                value = 'performance' if settings['governor'] == 'performance' else raw
+                old = managed.get('scalar:' + p + '/energy_performance_preference') if isinstance(managed, dict) else None
+                baseline = old['original'] if old else raw
+                value = 'performance' if settings['governor'] == 'performance' else baseline
                 changes.append(Change('epp', p + '/energy_performance_preference', value))
     changes.sort(key=lambda c: (c.key != 'governor', c.kind == 'service'))
     return changes, skipped
@@ -701,14 +703,16 @@ class Engine:
         """Explicit keep-external-value resolution; never write a conflicted parameter."""
         if key == 'boot':
             raise BosunError('Boot override cannot be released. Resolve its file conflict and rollback.')
+        keys = {'governor', 'epp'} if key in {'governor', 'epp'} else {key}
         removed = []
         for ident, entry in list(self.state['entries'].items()):
-            if entry['change']['key'] == key:
+            if entry['change']['key'] in keys:
                 if entry['change']['kind'] != 'scalar':
                     raise BosunError('Only scalar settings can be released')
                 removed.append(entry['change']['path'])
                 del self.state['entries'][ident]
-        self.state['desired'].pop(key, None)
+        for item in keys:
+            self.state['desired'].pop(item, None)
         self.save()
         return removed
 

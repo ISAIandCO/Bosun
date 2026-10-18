@@ -341,6 +341,8 @@ def main():
         elif args.action == 'disable':
             settings = dict(engine.state['desired'])
             settings.pop(args.key, None)
+            if args.key == 'governor':
+                settings.pop('epp', None)
             name = engine.state['profile'] + ':custom'
         elif args.action == 'reconcile':
             settings, name = engine.state['desired'], engine.state['profile']
