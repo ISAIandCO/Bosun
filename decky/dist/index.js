@@ -67,6 +67,138 @@ function watchGames(client, read, sync, error) {
     };
 }
 
+function readLaunch(apps, id) {
+    return new Promise((resolve, reject) => {
+        let subscription;
+        let done = false;
+        const timeout = setTimeout(() => { done = true; subscription?.unregister(); reject(new Error('Steam AppDetails timeout')); }, 5000);
+        try {
+            subscription = apps.RegisterForAppDetails(id, details => {
+                if (done)
+                    return;
+                const shortcut = !!details.strShortcutExe;
+                const text = shortcut ? details.strShortcutLaunchOptions : details.strLaunchOptions;
+                if (typeof text !== 'string')
+                    return;
+                done = true;
+                clearTimeout(timeout);
+                resolve({ text, shortcut });
+                subscription?.unregister();
+            });
+            if (done)
+                subscription.unregister();
+        }
+        catch (error) {
+            done = true;
+            clearTimeout(timeout);
+            subscription?.unregister();
+            reject(error);
+        }
+    });
+}
+async function writeLaunch(apps, id, expected, target, sameAccount = () => true) {
+    const current = await readLaunch(apps, id);
+    if (!sameAccount())
+        throw new Error('Steam account changed; refusing launch-option write');
+    if (current.text !== expected)
+        throw new Error('Steam launch options changed; refusing overwrite');
+    if (current.shortcut)
+        apps.SetShortcutLaunchOptions(id, target);
+    else
+        apps.SetAppLaunchOptions(id, target);
+    for (let attempt = 0; attempt < 8; attempt++) {
+        if (!sameAccount())
+            throw new Error('Steam account changed; backup retained');
+        const readback = await readLaunch(apps, id);
+        if (readback.text === target)
+            return target;
+        await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    throw new Error('Steam did not confirm launch options; original backup retained');
+}
+
+const preview$1 = callable('preview_launch');
+const prepare = callable('prepare_launch');
+const finish = callable('finish_launch');
+const account = () => window.App?.m_CurrentUser?.strSteamID || '';
+const unpack$1 = (r) => { if (!r.ok)
+    throw new Error(r.error || 'Bosun error'); return r.data; };
+async function restoreLaunchBackups(backups) {
+    for (const saved of Object.values(backups)) {
+        if (saved.account !== account())
+            throw new Error('Для полного отката войдите в Steam-аккаунт ' + saved.account + ' и восстановите его параметры запуска');
+        const current = await readLaunch(SteamClient.Apps, Number(saved.appid));
+        const result = unpack$1(await prepare(saved.account, saved.appid, current.text, '', 'restore', null));
+        const actual = await writeLaunch(SteamClient.Apps, Number(saved.appid), current.text, result.target, () => account() === saved.account);
+        unpack$1(await finish(saved.account, saved.appid, actual));
+    }
+}
+function LaunchPanel({ appid, backups, refresh }) {
+    const [loaded, setLoaded] = SP_REACT.useState(false);
+    const [text, setText] = SP_REACT.useState('');
+    const [baseline, setBaseline] = SP_REACT.useState('');
+    const [baselineKey, setBaselineKey] = SP_REACT.useState('');
+    const [options, setOptions] = SP_REACT.useState({});
+    const [message, setMessage] = SP_REACT.useState('');
+    const [busy, setBusy] = SP_REACT.useState(false);
+    SP_REACT.useEffect(() => { setLoaded(false); setText(''); setOptions({}); setMessage(''); }, [appid]);
+    const run = async (fn) => {
+        setBusy(true);
+        try {
+            await fn();
+        }
+        catch (e) {
+            setMessage(String(e));
+        }
+        finally {
+            try {
+                await refresh();
+            }
+            catch (e) {
+                setMessage(old => old + '\n' + String(e));
+            }
+            setBusy(false);
+        }
+    };
+    const current = async () => {
+        if (!/^[1-9][0-9]{0,9}$/.test(appid) || Number(appid) > 0xffffffff)
+            throw new Error('Укажите Steam AppID');
+        if (!account())
+            throw new Error('Steam не сообщает текущий аккаунт');
+        return readLaunch(SteamClient.Apps, Number(appid));
+    };
+    const mutate = async (mode, preset = false) => {
+        const owner = account();
+        const before = await current();
+        if (mode === 'write' && (!loaded || baselineKey !== owner + ':' + appid))
+            throw new Error('Сначала прочитайте параметры из Steam для этой игры и аккаунта');
+        if (mode === 'write' && before.text !== baseline)
+            throw new Error('Строка в Steam изменилась после чтения. Прочитайте её заново перед редактированием.');
+        if (account() !== owner)
+            throw new Error('Steam-аккаунт изменился');
+        const result = unpack$1(await prepare(owner, appid, before.text, text, mode, preset ? options : null));
+        if (mode !== 'keep') {
+            const actual = await writeLaunch(SteamClient.Apps, Number(appid), before.text, result.target, () => account() === owner);
+            unpack$1(await finish(owner, appid, actual));
+            setText(actual);
+            setBaseline(actual);
+        }
+        else {
+            setText(before.text);
+            setBaseline(before.text);
+        }
+        setBaselineKey(owner + ':' + appid);
+        setLoaded(true);
+        setMessage([...result.notes, 'Параметры проверены. Изменения действуют со следующего запуска игры.'].join('\n'));
+    };
+    const choose = (key, label, values) => SP_JSX.jsx(DFL.DropdownItem, { label: label, selectedOption: options[key] ?? '', disabled: busy, rgOptions: [{ data: '', label: 'Не задавать' }, ...values.map(([data, label]) => ({ data, label }))], onChange: o => setOptions(old => { const result = { ...old }; if (o.data === '')
+            delete result[key];
+        else
+            result[key] = o.data; return result; }) });
+    return SP_JSX.jsxs(DFL.PanelSection, { title: "\u041F\u0430\u0440\u0430\u043C\u0435\u0442\u0440\u044B \u0437\u0430\u043F\u0443\u0441\u043A\u0430 Steam \u2014 \u043E\u0442\u0434\u0435\u043B\u044C\u043D\u043E \u0434\u043B\u044F \u0438\u0433\u0440\u044B", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: "\u0418\u0433\u0440\u0430 \u0437\u0430\u043F\u0443\u0441\u043A\u0430\u0435\u0442\u0441\u044F \u043E\u0431\u044B\u0447\u043D\u044B\u043C \u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u0435\u043B\u0435\u043C. \u0413\u0440\u0430\u0444\u0438\u043A\u0430, \u0440\u0430\u0437\u0440\u0435\u0448\u0435\u043D\u0438\u0435 \u0438 HDR \u0430\u0432\u0442\u043E\u043C\u0430\u0442\u0438\u0447\u0435\u0441\u043A\u0438 \u043D\u0435 \u043C\u0435\u043D\u044F\u044E\u0442\u0441\u044F." }), SP_JSX.jsx(DFL.ButtonItem, { disabled: busy || !appid, onClick: () => run(async () => { const owner = account(); const value = await current(); if (account() !== owner)
+                    throw new Error('Steam-аккаунт изменился'); setText(value.text); setBaseline(value.text); setBaselineKey(owner + ':' + appid); setLoaded(true); setMessage('Прочитано из Steam'); }), children: "\u041F\u0440\u043E\u0447\u0438\u0442\u0430\u0442\u044C \u043F\u0430\u0440\u0430\u043C\u0435\u0442\u0440\u044B \u0438\u0437 Steam" }), loaded && SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.TextField, { label: "\u0422\u0435\u043A\u0443\u0449\u0430\u044F \u0441\u0442\u0440\u043E\u043A\u0430 / \u0440\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u043D\u0438\u0435", value: text, onChange: e => setText(e.target.value) }), choose('cache_gb', 'Лимит Mesa shader cache (не всех кешей Steam)', [1, 2, 4, 8, 16].map(n => [n, `${n} GiB на архитектуру`])), choose('sync', 'Синхронизация Proton', [['auto', 'Автовыбор Proton, убрать унаследованные запреты'], ['fsync', 'Обойти NTSYNC, разрешить Fsync при поддержке Proton/ядром']]), choose('dxvk_latency', 'DXVK: максимум кадров в очереди', [1, 2, 3, 4].map(n => [n, String(n)])), choose('radv_wave32', 'RADV wave32 — эксперимент по игре', [['compute', 'Compute'], ['pixel', 'Pixel'], ['geometry', 'Geometry'], ['all', 'Все три стадии']]), choose('radv_nir_cache', 'RADV NIR cache — только при поддержке драйвером', [[true, 'Включить']]), choose('io_priority', 'I/O приоритет процесса (best-effort)', [[0, '0 — высокий'], [2, '2'], [4, '4 — обычный'], [7, '7 — низкий']]), choose('affinity', 'CPU affinity игры без глобального отключения SMT', [['physical', 'Один поток на физическое ядро']]), SP_JSX.jsx(DFL.ButtonItem, { disabled: busy, onClick: () => run(async () => { const before = await current(); const result = unpack$1(await preview$1(account(), appid, before.text, options)); setText(result.target); setMessage(result.notes.join('\n') || 'Предпросмотр готов; изменений нет'); }), children: "\u041F\u0440\u0435\u0434\u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440 \u0432\u044B\u0431\u0440\u0430\u043D\u043D\u044B\u0445 \u043F\u0430\u0440\u0430\u043C\u0435\u0442\u0440\u043E\u0432" }), SP_JSX.jsx(DFL.ButtonItem, { disabled: busy, onClick: () => run(() => mutate('write', true)), children: "\u041F\u0440\u0438\u043C\u0435\u043D\u0438\u0442\u044C \u0432\u044B\u0431\u0440\u0430\u043D\u043D\u044B\u0435 \u043F\u0430\u0440\u0430\u043C\u0435\u0442\u0440\u044B" }), SP_JSX.jsx(DFL.ButtonItem, { disabled: busy, onClick: () => run(() => mutate('write')), children: "\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C \u043E\u0442\u0440\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u043D\u043D\u0443\u044E \u0441\u0442\u0440\u043E\u043A\u0443" })] }), backups[account() + ':' + appid] && SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: backups[account() + ':' + appid].pending ? 'Есть незавершённая запись: прочитайте строку Steam и повторите применение или восстановление.' : 'Исходная строка Steam сохранена для этого аккаунта.' }), SP_JSX.jsx(DFL.ButtonItem, { disabled: busy, onClick: () => run(() => mutate('restore')), children: "\u0412\u0435\u0440\u043D\u0443\u0442\u044C \u0438\u0441\u0445\u043E\u0434\u043D\u0443\u044E \u0441\u0442\u0440\u043E\u043A\u0443 Steam" }), SP_JSX.jsx(DFL.ButtonItem, { disabled: busy, onClick: () => run(() => mutate('keep')), children: "\u041E\u0441\u0442\u0430\u0432\u0438\u0442\u044C \u0432\u043D\u0435\u0448\u043D\u044E\u044E \u0441\u0442\u0440\u043E\u043A\u0443 \u0438 \u0441\u043D\u044F\u0442\u044C \u0432\u043B\u0430\u0434\u0435\u043D\u0438\u0435" })] }), message && SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 13 }, children: message }) })] });
+}
+
 const getState = callable('get_state');
 const saveGame = callable('save_game');
 const removeGame = callable('remove_game');
@@ -77,6 +209,7 @@ const applyGlobal = callable('apply_global');
 const release = callable('release');
 const rollback = callable('rollback');
 const update = callable('update');
+const measurementTools = callable('measurement_tools');
 const currentGame = () => ({ id: String(DFL.Router.MainRunningApp?.appid || ''), name: DFL.Router.MainRunningApp?.display_name || '' });
 function unpack(reply) { if (!reply.ok)
     throw new Error(reply.error || 'Bosun error'); return reply.data; }
@@ -92,6 +225,8 @@ const labels = {
     thp: 'Политика THP', swappiness: 'Swappiness', governor: 'CPU governor', epp: 'CPU EPP', boost: 'CPU Boost', smt: 'SMT', cpu_max_mhz: 'Предел CPU, MHz', tdp_w: 'TDP APU, W', gpu_mode: 'GPU policy',
     nvme_scheduler: 'NVMe I/O scheduler', sd_scheduler: 'microSD I/O scheduler', moverate: 'AMDGPU migration MB/s', lbpw: 'LBPW: неприменим к Deck RDNA2', lavd: 'Scheduler LAVD',
     compaction_proactiveness: 'Фоновая компактация RAM', nvme_readahead_kb: 'NVMe read-ahead, KiB', sd_readahead_kb: 'microSD read-ahead, KiB', zram_algorithm: 'Компрессор zram (reboot)', zram_size_percent: 'Размер zram, % RAM (reboot)', workqueue_power_efficient: 'Workqueue power efficient (reboot)',
+    amd_pstate: 'Режим AMD P-state (reboot)', gpu_sched_policy: 'GPU scheduler: 0 RR / 1 FIFO (reboot)', epp_boost: 'Per-core EPP boost (если есть, reboot)', home_noatime: 'Отключить atime для /home', usb_poll_ms: 'USB HID polling, ms (reboot)', memlock_kb: 'Лимит закреплённой RAM, KiB (reboot)',
+    thp_shmem: 'THP для shared memory', dirty_background_mib: 'Фоновый writeback, MiB (пара)', dirty_mib: 'Прямой writeback, MiB (пара)', sched_autogroup: 'CPU autogroup', soft_watchdog: 'Soft watchdog', ksm: 'Сканирование KSM',
 };
 function Content() {
     const [data, setData] = SP_REACT.useState();
@@ -135,12 +270,17 @@ function Content() {
         try {
             const result = unpack(await action());
             setMessage(result.notes.join('\n') || 'Готово');
-            await refresh();
         }
         catch (e) {
             setMessage(String(e));
         }
         finally {
+            try {
+                await refresh();
+            }
+            catch (e) {
+                setMessage(old => old + '\n' + String(e));
+            }
             setBusy(false);
         }
     };
@@ -150,6 +290,10 @@ function Content() {
             delete result[setting];
         else
             result[setting] = next;
+        if (next === undefined && ['dirty_background_mib', 'dirty_mib'].includes(setting)) {
+            delete result.dirty_background_mib;
+            delete result.dirty_mib;
+        }
         if (setting === 'epp' && next)
             result.governor = 'powersave';
         if (setting === 'governor' && next !== 'powersave')
@@ -161,6 +305,7 @@ function Content() {
     if (!data)
         return SP_JSX.jsxs(DFL.PanelSection, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: loadError || 'Загрузка Bosun…' }), SP_JSX.jsx(DFL.ButtonItem, { onClick: () => refresh().catch(notifyError), children: "\u041F\u043E\u0432\u0442\u043E\u0440\u0438\u0442\u044C \u0437\u0430\u0433\u0440\u0443\u0437\u043A\u0443" })] });
     const system = data.report.system;
+    const savedApps = [...new Set([...Object.keys(data.config.games), ...Object.values(data.config.launch_options || {}).map(saved => saved.appid)])];
     const keys = Object.keys(data.catalog).filter(k => k !== 'lbpw' && (scope === 'global' || data.runtime_keys.includes(k)));
     const add = () => {
         if (!keys.includes(key)) {
@@ -171,8 +316,8 @@ function Content() {
         set(key, parsed);
         setMessage('Параметр добавлен в черновик. Проверьте предпросмотр.');
     };
-    return SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsxs(DFL.PanelSection, { title: `Bosun 0.2 · ${system.model || 'неизвестная модель'}`, children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { fontSize: 13 }, children: ["RAM ", system.model_specs.ram_mt_s, " MT/s \u00B7 \u0431\u0430\u0442\u0430\u0440\u0435\u044F ", system.model_specs.battery_design_wh, " Wh \u00B7 \u043F\u0430\u043D\u0435\u043B\u044C \u0434\u043E ", system.model_specs.panel_max_hz, " Hz", SP_JSX.jsx("br", {}), "\u042F\u0434\u0440\u043E ", system.kernel, SP_JSX.jsx("br", {}), "CPU driver: ", [...new Set(Object.values(system.cpu).map(p => p.scaling_driver))].join(', '), SP_JSX.jsx("br", {}), "\u041F\u0440\u043E\u0444\u0438\u043B\u044C: ", data.report.profile, " \u00B7 RO: ", system.readonly, SP_JSX.jsx("br", {}), game.id ? `Игра: ${game.name} (${game.id})` : 'Игра не запущена'] }) }), data.report.update_pending && SP_JSX.jsx(DFL.PanelSectionRow, { children: "SteamOS/\u0441\u0442\u0435\u043A \u043E\u0431\u043D\u043E\u0432\u0438\u043B\u0441\u044F: \u043F\u0440\u043E\u0432\u0435\u0440\u044C\u0442\u0435 \u0433\u043B\u043E\u0431\u0430\u043B\u044C\u043D\u044B\u0439 \u043F\u0440\u043E\u0444\u0438\u043B\u044C \u043F\u0435\u0440\u0435\u0434 \u043F\u0440\u0438\u043C\u0435\u043D\u0435\u043D\u0438\u0435\u043C." }), data.power_conflicts.length > 0 && SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["\u041A\u043E\u043D\u043A\u0443\u0440\u0438\u0440\u0443\u044E\u0449\u0438\u0439 \u043C\u0435\u043D\u0435\u0434\u0436\u0435\u0440 \u043F\u0438\u0442\u0430\u043D\u0438\u044F: ", data.power_conflicts.join(', '), ". Power-\u043D\u0430\u0441\u0442\u0440\u043E\u0439\u043A\u0438 \u0431\u0443\u0434\u0443\u0442 \u043F\u0440\u043E\u043F\u0443\u0449\u0435\u043D\u044B."] }), SP_JSX.jsx(DFL.ToggleField, { label: "\u0410\u0432\u0442\u043E\u043C\u0430\u0442\u0438\u0447\u0435\u0441\u043A\u0438\u0435 \u043F\u0440\u043E\u0444\u0438\u043B\u0438 \u0438\u0433\u0440", checked: data.config.automatic, disabled: busy, onChange: enabled => run(async () => { const r = await automatic(enabled); unpack(r); await syncGame(currentGame()); return r; }) }), SP_JSX.jsx(DFL.ButtonItem, { disabled: busy, onClick: () => run(async () => { await syncGame(currentGame()); return { ok: true, data: { notes: ['Текущая игра синхронизирована'] } }; }), children: "\u0421\u0438\u043D\u0445\u0440\u043E\u043D\u0438\u0437\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0442\u0435\u043A\u0443\u0449\u0443\u044E \u0438\u0433\u0440\u0443" }), SP_JSX.jsx(DFL.DropdownItem, { label: "\u0420\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C", selectedOption: scope, rgOptions: [{ data: 'game', label: 'Профиль игры' }, { data: 'global', label: 'Глобальные настройки' }], onChange: o => setScope(String(o.data)) })] }), scope === 'game' && SP_JSX.jsxs(DFL.PanelSection, { title: "\u041D\u0430\u0437\u043D\u0430\u0447\u0435\u043D\u0438\u0435 \u0438\u0433\u0440\u0435", children: [SP_JSX.jsx(DFL.ButtonItem, { onClick: () => { setAppid(game.id); setName(game.name); }, children: "\u0412\u044B\u0431\u0440\u0430\u0442\u044C \u0437\u0430\u043F\u0443\u0449\u0435\u043D\u043D\u0443\u044E \u0438\u0433\u0440\u0443" }), SP_JSX.jsx(DFL.DropdownItem, { label: "\u0421\u043E\u0445\u0440\u0430\u043D\u0451\u043D\u043D\u044B\u0435 \u0438\u0433\u0440\u044B", selectedOption: appid, rgOptions: Object.entries(data.config.games).map(([id, p]) => ({ data: id, label: `${p.name || id} (${id})` })), onChange: o => setAppid(String(o.data)) }), SP_JSX.jsx(DFL.TextField, { label: "AppID (\u043C\u043E\u0436\u043D\u043E \u0443\u043A\u0430\u0437\u0430\u0442\u044C \u0434\u043E \u0437\u0430\u043F\u0443\u0441\u043A\u0430 \u0438\u0433\u0440\u044B)", value: appid, onChange: e => setAppid(e.target.value) }), SP_JSX.jsx(DFL.TextField, { label: "\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435", value: name, onChange: e => setName(e.target.value) }), SP_JSX.jsx(DFL.ToggleField, { label: "\u041E\u0434\u0438\u043D \u0440\u0430\u0437 \u0432\u043E\u0441\u0441\u0442\u0430\u043D\u043E\u0432\u0438\u0442\u044C \u043F\u043E\u0441\u043B\u0435 \u0441\u043D\u0430", description: "\u0422\u043E\u043B\u044C\u043A\u043E \u0438\u0437\u0432\u0435\u0441\u0442\u043D\u044B\u0435 \u0441\u0431\u0440\u043E\u0441\u044B; \u0431\u0435\u0437 \u043F\u043E\u0441\u0442\u043E\u044F\u043D\u043D\u043E\u0439 \u043F\u0435\u0440\u0435\u0437\u0430\u043F\u0438\u0441\u0438 \u043D\u0430\u0441\u0442\u0440\u043E\u0435\u043A Steam", checked: resume, onChange: setResume })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "\u041D\u0430\u0441\u0442\u0440\u043E\u0439\u043A\u0438 \u043F\u0440\u043E\u0444\u0438\u043B\u044F", children: [SP_JSX.jsx(DFL.DropdownItem, { label: "\u0417\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044C \u043E\u0441\u043D\u043E\u0432\u0443 \u0432 \u0447\u0435\u0440\u043D\u043E\u0432\u0438\u043A", selectedOption: "", strDefaultLabel: "\u0412\u044B\u0431\u0440\u0430\u0442\u044C \u043F\u0440\u043E\u0444\u0438\u043B\u044C", rgOptions: Object.keys(data.profiles).map(p => ({ data: p, label: p })), onChange: o => { const settings = data.profiles[String(o.data)]; setDraft(Object.fromEntries(Object.entries(settings).filter(([k]) => scope === 'global' || data.runtime_keys.includes(k)))); } }), choose('governor', ['powersave', 'performance', 'schedutil']), choose('epp', ['performance', 'balance_performance', 'balance_power', 'power']), SP_JSX.jsx(DFL.DropdownItem, { label: "CPU Boost", selectedOption: draft.boost ?? '', rgOptions: [{ data: '', label: 'Наследовать' }, { data: 0, label: 'Выключить' }, { data: 1, label: 'Включить' }], onChange: o => set('boost', o.data === '' ? undefined : Number(o.data)) }), slider('cpu_max_mhz', 400, 3500, 100, 2800), slider('tdp_w', 4, 15, 1, 10), choose('gpu_mode', ['auto', 'low', 'high']), SP_JSX.jsx(DFL.PanelSectionRow, { children: "\u0417\u0430\u0434\u0430\u0439\u0442\u0435 FPS cap \u0438 refresh \u0448\u0442\u0430\u0442\u043D\u044B\u043C\u0438 \u0441\u0440\u0435\u0434\u0441\u0442\u0432\u0430\u043C\u0438 Steam; \u0433\u0440\u0430\u0444\u0438\u043A\u0430 \u0438 \u0440\u0430\u0437\u0440\u0435\u0448\u0435\u043D\u0438\u0435 \u044D\u0442\u0438\u043C \u043F\u0440\u043E\u0444\u0438\u043B\u0435\u043C \u043D\u0435 \u0441\u043D\u0438\u0436\u0430\u044E\u0442\u0441\u044F." })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "\u041E\u0442\u0434\u0435\u043B\u044C\u043D\u044B\u0435 \u0438 \u044D\u043A\u0441\u043F\u0435\u0440\u0438\u043C\u0435\u043D\u0442\u0430\u043B\u044C\u043D\u044B\u0435 \u043F\u0430\u0440\u0430\u043C\u0435\u0442\u0440\u044B", children: [SP_JSX.jsx(DFL.DropdownItem, { label: "\u041F\u0430\u0440\u0430\u043C\u0435\u0442\u0440", selectedOption: key, rgOptions: keys.map(k => ({ data: k, label: labels[k] || k })), onChange: o => setKey(String(o.data)) }), SP_JSX.jsx(DFL.TextField, { label: `Значение: ${data.catalog[key]?.[0] || ''}`, value: value, onChange: e => setValue(e.target.value) }), SP_JSX.jsx(DFL.ButtonItem, { disabled: busy, onClick: add, children: "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C / \u0437\u0430\u043C\u0435\u043D\u0438\u0442\u044C \u0432 \u0447\u0435\u0440\u043D\u043E\u0432\u0438\u043A\u0435" }), Object.entries(draft).map(([k, v]) => SP_JSX.jsxs(DFL.ButtonItem, { disabled: busy, onClick: () => set(k, undefined), children: [labels[k] || k, ": ", v, " \u00B7 \u0443\u0431\u0440\u0430\u0442\u044C"] }, k)), SP_JSX.jsx(DFL.ButtonItem, { disabled: busy, onClick: () => run(() => preview(draft, scope === 'game')), children: "\u041F\u0440\u0435\u0434\u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440 \u0431\u0435\u0437 \u0438\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u0439" }), scope === 'game' ? SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.ButtonItem, { disabled: busy || !appid, onClick: () => run(async () => { const r = await saveGame(appid, name, draft, resume); unpack(r); if (appid === currentGame().id)
-                                    await syncGame(currentGame()); return r; }), children: "\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C \u043D\u0430\u0437\u043D\u0430\u0447\u0435\u043D\u0438\u0435 \u0438\u0433\u0440\u0435" }), SP_JSX.jsx(DFL.ButtonItem, { disabled: busy || !appid, onClick: () => run(() => removeGame(appid)), children: "\u0423\u0434\u0430\u043B\u0438\u0442\u044C \u043D\u0430\u0437\u043D\u0430\u0447\u0435\u043D\u0438\u0435" })] }) : SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.ButtonItem, { disabled: busy, onClick: () => run(() => applyGlobal('decky-global', draft)), children: "\u041F\u0440\u0438\u043C\u0435\u043D\u0438\u0442\u044C \u0433\u043B\u043E\u0431\u0430\u043B\u044C\u043D\u043E" }), SP_JSX.jsx(DFL.ButtonItem, { disabled: busy, onClick: () => run(() => applyGlobal('recommended', data.profiles.recommended)), children: "\u041F\u0440\u0438\u043C\u0435\u043D\u0438\u0442\u044C \u0440\u0435\u043A\u043E\u043C\u0435\u043D\u0434\u0443\u0435\u043C\u044B\u0439 \u043F\u0440\u043E\u0444\u0438\u043B\u044C" })] })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "\u0421\u043E\u0441\u0442\u043E\u044F\u043D\u0438\u0435 \u0438 \u043E\u0431\u0441\u043B\u0443\u0436\u0438\u0432\u0430\u043D\u0438\u0435", children: [data.report.managed.map((m, i) => SP_JSX.jsxs(DFL.PanelSectionRow, { children: [labels[m.change.key] || m.change.key, ": ", ['boot', 'zram_config'].includes(m.change.key) ? 'override сохранён; проверка эффекта после reboot' : String(m.actual).slice(0, 120), " ", m.matches ? '✓' : '— расхождение', !m.matches && m.change.kind === 'scalar' && SP_JSX.jsx(DFL.ButtonItem, { disabled: busy, onClick: () => run(() => release(m.change.key)), children: "\u041E\u0441\u0442\u0430\u0432\u0438\u0442\u044C \u0444\u0430\u043A\u0442\u0438\u0447\u0435\u0441\u043A\u043E\u0435 \u0437\u043D\u0430\u0447\u0435\u043D\u0438\u0435" })] }, i)), SP_JSX.jsx(DFL.ButtonItem, { disabled: busy, onClick: () => run(() => rollback()), children: "\u041F\u043E\u043B\u043D\u044B\u0439 \u043E\u0442\u043A\u0430\u0442 \u0438 \u043E\u0442\u043A\u043B\u044E\u0447\u0435\u043D\u0438\u0435 \u0430\u0432\u0442\u043E\u043F\u0440\u043E\u0444\u0438\u043B\u0435\u0439" }), SP_JSX.jsx(DFL.ButtonItem, { disabled: busy, onClick: () => run(() => update()), children: "\u041E\u0431\u043D\u043E\u0432\u0438\u0442\u044C Bosun \u0438 \u043F\u043B\u0430\u0433\u0438\u043D" }), SP_JSX.jsx(DFL.ButtonItem, { disabled: busy, onClick: () => refresh().catch(notifyError), children: "\u041E\u0431\u043D\u043E\u0432\u0438\u0442\u044C \u0444\u0430\u043A\u0442\u0438\u0447\u0435\u0441\u043A\u043E\u0435 \u0441\u043E\u0441\u0442\u043E\u044F\u043D\u0438\u0435" }), message && SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 13 }, children: message }) })] })] });
+    return SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsxs(DFL.PanelSection, { title: `Bosun 0.3 · ${system.model || 'неизвестная модель'}`, children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { fontSize: 13 }, children: ["RAM ", system.model_specs.ram_mt_s, " MT/s \u00B7 \u0431\u0430\u0442\u0430\u0440\u0435\u044F ", system.model_specs.battery_design_wh, " Wh \u00B7 \u043F\u0430\u043D\u0435\u043B\u044C \u0434\u043E ", system.model_specs.panel_max_hz, " Hz", SP_JSX.jsx("br", {}), "\u042F\u0434\u0440\u043E ", system.kernel, SP_JSX.jsx("br", {}), "CPU driver: ", [...new Set(Object.values(system.cpu).map(p => p.scaling_driver))].join(', '), SP_JSX.jsx("br", {}), "\u041F\u0440\u043E\u0444\u0438\u043B\u044C: ", data.report.profile, " \u00B7 RO: ", system.readonly, SP_JSX.jsx("br", {}), game.id ? `Игра: ${game.name} (${game.id})` : 'Игра не запущена'] }) }), data.report.update_pending && SP_JSX.jsx(DFL.PanelSectionRow, { children: "SteamOS/\u0441\u0442\u0435\u043A \u043E\u0431\u043D\u043E\u0432\u0438\u043B\u0441\u044F: \u043F\u0440\u043E\u0432\u0435\u0440\u044C\u0442\u0435 \u0433\u043B\u043E\u0431\u0430\u043B\u044C\u043D\u044B\u0439 \u043F\u0440\u043E\u0444\u0438\u043B\u044C \u043F\u0435\u0440\u0435\u0434 \u043F\u0440\u0438\u043C\u0435\u043D\u0435\u043D\u0438\u0435\u043C." }), data.power_conflicts.length > 0 && SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["\u041A\u043E\u043D\u043A\u0443\u0440\u0438\u0440\u0443\u044E\u0449\u0438\u0439 \u043C\u0435\u043D\u0435\u0434\u0436\u0435\u0440 \u043F\u0438\u0442\u0430\u043D\u0438\u044F: ", data.power_conflicts.join(', '), ". Power-\u043D\u0430\u0441\u0442\u0440\u043E\u0439\u043A\u0438 \u0431\u0443\u0434\u0443\u0442 \u043F\u0440\u043E\u043F\u0443\u0449\u0435\u043D\u044B."] }), SP_JSX.jsx(DFL.ToggleField, { label: "\u0410\u0432\u0442\u043E\u043C\u0430\u0442\u0438\u0447\u0435\u0441\u043A\u0438\u0435 \u043F\u0440\u043E\u0444\u0438\u043B\u0438 \u0438\u0433\u0440", checked: data.config.automatic, disabled: busy, onChange: enabled => run(async () => { const r = await automatic(enabled); unpack(r); await syncGame(currentGame()); return r; }) }), SP_JSX.jsx(DFL.ButtonItem, { disabled: busy, onClick: () => run(async () => { await syncGame(currentGame()); return { ok: true, data: { notes: ['Текущая игра синхронизирована'] } }; }), children: "\u0421\u0438\u043D\u0445\u0440\u043E\u043D\u0438\u0437\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0442\u0435\u043A\u0443\u0449\u0443\u044E \u0438\u0433\u0440\u0443" }), SP_JSX.jsx(DFL.DropdownItem, { label: "\u0420\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C", selectedOption: scope, rgOptions: [{ data: 'game', label: 'Профиль игры' }, { data: 'global', label: 'Глобальные настройки' }], onChange: o => setScope(String(o.data)) })] }), scope === 'game' && SP_JSX.jsxs(DFL.PanelSection, { title: "\u041D\u0430\u0437\u043D\u0430\u0447\u0435\u043D\u0438\u0435 \u0438\u0433\u0440\u0435", children: [SP_JSX.jsx(DFL.ButtonItem, { onClick: () => { setAppid(game.id); setName(game.name); }, children: "\u0412\u044B\u0431\u0440\u0430\u0442\u044C \u0437\u0430\u043F\u0443\u0449\u0435\u043D\u043D\u0443\u044E \u0438\u0433\u0440\u0443" }), SP_JSX.jsx(DFL.DropdownItem, { label: "\u0421\u043E\u0445\u0440\u0430\u043D\u0451\u043D\u043D\u044B\u0435 \u0438\u0433\u0440\u044B \u0438 \u0441\u0442\u0440\u043E\u043A\u0438 \u0437\u0430\u043F\u0443\u0441\u043A\u0430", selectedOption: appid, rgOptions: savedApps.map(id => ({ data: id, label: `${data.config.games[id]?.name || 'Steam'} (${id})` })), onChange: o => setAppid(String(o.data)) }), SP_JSX.jsx(DFL.TextField, { label: "AppID (\u043C\u043E\u0436\u043D\u043E \u0443\u043A\u0430\u0437\u0430\u0442\u044C \u0434\u043E \u0437\u0430\u043F\u0443\u0441\u043A\u0430 \u0438\u0433\u0440\u044B)", value: appid, onChange: e => setAppid(e.target.value) }), SP_JSX.jsx(DFL.TextField, { label: "\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435", value: name, onChange: e => setName(e.target.value) }), SP_JSX.jsx(DFL.ToggleField, { label: "\u041E\u0434\u0438\u043D \u0440\u0430\u0437 \u0432\u043E\u0441\u0441\u0442\u0430\u043D\u043E\u0432\u0438\u0442\u044C \u043F\u043E\u0441\u043B\u0435 \u0441\u043D\u0430", description: "\u0422\u043E\u043B\u044C\u043A\u043E \u0438\u0437\u0432\u0435\u0441\u0442\u043D\u044B\u0435 \u0441\u0431\u0440\u043E\u0441\u044B; \u0431\u0435\u0437 \u043F\u043E\u0441\u0442\u043E\u044F\u043D\u043D\u043E\u0439 \u043F\u0435\u0440\u0435\u0437\u0430\u043F\u0438\u0441\u0438 \u043D\u0430\u0441\u0442\u0440\u043E\u0435\u043A Steam", checked: resume, onChange: setResume })] }), scope === 'game' && SP_JSX.jsx(LaunchPanel, { appid: appid, backups: data.config.launch_options || {}, refresh: refresh }), SP_JSX.jsxs(DFL.PanelSection, { title: "\u041D\u0430\u0441\u0442\u0440\u043E\u0439\u043A\u0438 \u043F\u0440\u043E\u0444\u0438\u043B\u044F", children: [SP_JSX.jsx(DFL.DropdownItem, { label: "\u0417\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044C \u043E\u0441\u043D\u043E\u0432\u0443 \u0432 \u0447\u0435\u0440\u043D\u043E\u0432\u0438\u043A", selectedOption: "", strDefaultLabel: "\u0412\u044B\u0431\u0440\u0430\u0442\u044C \u043F\u0440\u043E\u0444\u0438\u043B\u044C", rgOptions: Object.keys(data.profiles).map(p => ({ data: p, label: p })), onChange: o => { const settings = data.profiles[String(o.data)]; setDraft(Object.fromEntries(Object.entries(settings).filter(([k]) => scope === 'global' || data.runtime_keys.includes(k)))); } }), choose('governor', ['powersave', 'performance', 'schedutil']), choose('epp', ['performance', 'balance_performance', 'balance_power', 'power']), SP_JSX.jsx(DFL.DropdownItem, { label: "CPU Boost", selectedOption: draft.boost ?? '', rgOptions: [{ data: '', label: 'Наследовать' }, { data: 0, label: 'Выключить' }, { data: 1, label: 'Включить' }], onChange: o => set('boost', o.data === '' ? undefined : Number(o.data)) }), slider('cpu_max_mhz', 400, 3500, 100, 2800), slider('tdp_w', 4, 15, 1, 10), choose('gpu_mode', ['auto', 'low', 'high']), SP_JSX.jsx(DFL.PanelSectionRow, { children: "\u0417\u0430\u0434\u0430\u0439\u0442\u0435 FPS cap \u0438 refresh \u0448\u0442\u0430\u0442\u043D\u044B\u043C\u0438 \u0441\u0440\u0435\u0434\u0441\u0442\u0432\u0430\u043C\u0438 Steam; \u0433\u0440\u0430\u0444\u0438\u043A\u0430 \u0438 \u0440\u0430\u0437\u0440\u0435\u0448\u0435\u043D\u0438\u0435 \u044D\u0442\u0438\u043C \u043F\u0440\u043E\u0444\u0438\u043B\u0435\u043C \u043D\u0435 \u0441\u043D\u0438\u0436\u0430\u044E\u0442\u0441\u044F." })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "\u041E\u0442\u0434\u0435\u043B\u044C\u043D\u044B\u0435 \u0438 \u044D\u043A\u0441\u043F\u0435\u0440\u0438\u043C\u0435\u043D\u0442\u0430\u043B\u044C\u043D\u044B\u0435 \u043F\u0430\u0440\u0430\u043C\u0435\u0442\u0440\u044B", children: [SP_JSX.jsx(DFL.DropdownItem, { label: "\u041F\u0430\u0440\u0430\u043C\u0435\u0442\u0440", selectedOption: key, rgOptions: keys.map(k => ({ data: k, label: labels[k] || k })), onChange: o => setKey(String(o.data)) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: 12 }, children: data.catalog[key]?.[1] }) }), SP_JSX.jsx(DFL.TextField, { label: `Значение: ${data.catalog[key]?.[0] || ''}`, value: value, onChange: e => setValue(e.target.value) }), SP_JSX.jsx(DFL.ButtonItem, { disabled: busy, onClick: add, children: "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C / \u0437\u0430\u043C\u0435\u043D\u0438\u0442\u044C \u0432 \u0447\u0435\u0440\u043D\u043E\u0432\u0438\u043A\u0435" }), Object.entries(draft).map(([k, v]) => SP_JSX.jsxs(DFL.ButtonItem, { disabled: busy, onClick: () => set(k, undefined), children: [labels[k] || k, ": ", v, " \u00B7 \u0443\u0431\u0440\u0430\u0442\u044C"] }, k)), SP_JSX.jsx(DFL.ButtonItem, { disabled: busy, onClick: () => run(() => preview(draft, scope === 'game')), children: "\u041F\u0440\u0435\u0434\u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440 \u0431\u0435\u0437 \u0438\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u0439" }), scope === 'game' ? SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.ButtonItem, { disabled: busy || !appid, onClick: () => run(async () => { const r = await saveGame(appid, name, draft, resume); unpack(r); if (appid === currentGame().id)
+                                    await syncGame(currentGame()); return r; }), children: "\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C \u043D\u0430\u0437\u043D\u0430\u0447\u0435\u043D\u0438\u0435 \u0438\u0433\u0440\u0435" }), SP_JSX.jsx(DFL.ButtonItem, { disabled: busy || !appid, onClick: () => run(() => removeGame(appid)), children: "\u0423\u0434\u0430\u043B\u0438\u0442\u044C \u043D\u0430\u0437\u043D\u0430\u0447\u0435\u043D\u0438\u0435" })] }) : SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.ButtonItem, { disabled: busy, onClick: () => run(() => applyGlobal('decky-global', draft)), children: "\u041F\u0440\u0438\u043C\u0435\u043D\u0438\u0442\u044C \u0433\u043B\u043E\u0431\u0430\u043B\u044C\u043D\u043E" }), SP_JSX.jsx(DFL.ButtonItem, { disabled: busy, onClick: () => run(() => applyGlobal('recommended', data.profiles.recommended)), children: "\u041F\u0440\u0438\u043C\u0435\u043D\u0438\u0442\u044C \u0440\u0435\u043A\u043E\u043C\u0435\u043D\u0434\u0443\u0435\u043C\u044B\u0439 \u043F\u0440\u043E\u0444\u0438\u043B\u044C" })] })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "\u0421\u043E\u0441\u0442\u043E\u044F\u043D\u0438\u0435 \u0438 \u043E\u0431\u0441\u043B\u0443\u0436\u0438\u0432\u0430\u043D\u0438\u0435", children: [data.report.managed.map((m, i) => SP_JSX.jsxs(DFL.PanelSectionRow, { children: [labels[m.change.key] || m.change.key, ": ", ['boot', 'zram_config'].includes(m.change.key) ? 'override сохранён; проверка эффекта после reboot' : String(m.actual).slice(0, 120), " ", m.matches ? '✓' : '— расхождение', !m.matches && m.change.kind === 'scalar' && SP_JSX.jsx(DFL.ButtonItem, { disabled: busy, onClick: () => run(() => release(m.change.key)), children: "\u041E\u0441\u0442\u0430\u0432\u0438\u0442\u044C \u0444\u0430\u043A\u0442\u0438\u0447\u0435\u0441\u043A\u043E\u0435 \u0437\u043D\u0430\u0447\u0435\u043D\u0438\u0435" })] }, i)), SP_JSX.jsx(DFL.ButtonItem, { disabled: busy, onClick: () => run(measurementTools), children: "\u041F\u043E\u0434\u0433\u043E\u0442\u043E\u0432\u0438\u0442\u044C MangoHud \u0434\u043B\u044F A/B-\u0437\u0430\u043C\u0435\u0440\u043E\u0432" }), SP_JSX.jsx(DFL.ButtonItem, { disabled: busy, onClick: () => run(async () => { await restoreLaunchBackups(data.config.launch_options || {}); return rollback(); }), children: "\u041F\u043E\u043B\u043D\u044B\u0439 \u043E\u0442\u043A\u0430\u0442, \u0432\u043A\u043B\u044E\u0447\u0430\u044F \u043F\u0430\u0440\u0430\u043C\u0435\u0442\u0440\u044B \u0437\u0430\u043F\u0443\u0441\u043A\u0430 Steam" }), SP_JSX.jsx(DFL.ButtonItem, { disabled: busy, onClick: () => run(() => update()), children: "\u041E\u0431\u043D\u043E\u0432\u0438\u0442\u044C Bosun \u0438 \u043F\u043B\u0430\u0433\u0438\u043D" }), SP_JSX.jsx(DFL.ButtonItem, { disabled: busy, onClick: () => refresh().catch(notifyError), children: "\u041E\u0431\u043D\u043E\u0432\u0438\u0442\u044C \u0444\u0430\u043A\u0442\u0438\u0447\u0435\u0441\u043A\u043E\u0435 \u0441\u043E\u0441\u0442\u043E\u044F\u043D\u0438\u0435" }), message && SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 13 }, children: message }) })] })] });
 }
 var index = definePlugin(() => {
     const stop = watchGames(SteamClient, currentGame, syncGame, notifyError);

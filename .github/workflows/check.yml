@@ -22,7 +22,7 @@ jobs:
           cache-dependency-path: decky/package-lock.json
       - run: npm --prefix decky ci --ignore-scripts --no-audit --no-fund
       - run: npm --prefix decky run check
-      - run: node --test decky/tests/events.test.cjs
+      - run: node --test decky/tests/*.test.cjs
       - run: npm --prefix decky run build
       - run: git diff --exit-code -- decky/dist/index.js
       - name: Validate desktop launcher and systemd units
@@ -37,3 +37,27 @@ jobs:
               Path('/tmp/' + Path(path).name).write_text(text)
           PY
           systemd-analyze verify /tmp/bosun-restore.service /tmp/bosun-resume.service /tmp/bosun-session.service /tmp/bosun-session.path
+      - name: Verify installable release archive
+        run: |
+          python3 scripts/package.py
+          cd release
+          sha256sum --check SHA256SUMS
+  release:
+    needs: checks
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish checked version once
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version=$(python3 -c 'from bosun.core import VERSION; print(VERSION)')
+          if gh release view "v$version" >/dev/null 2>&1; then
+            echo "Version $version is already published"
+            exit 0
+          fi
+          python3 scripts/package.py
+          gh release create "v$version" --target "$GITHUB_SHA" --title "Bosun $version" --notes-file "docs/releases/$version.md" release/*

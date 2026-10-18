@@ -50,6 +50,18 @@ class Plugin:
     async def rollback(self):
         return await self._call('rollback')
 
+    async def measurement_tools(self):
+        return await self._call('measurement_tools')
+
+    async def preview_launch(self, account, appid, current, options):
+        return await self._call('preview_launch', account, appid, current, options)
+
+    async def prepare_launch(self, account, appid, current, target, mode='write', options=None):
+        return await self._call('prepare_launch', account, appid, current, target, mode, options)
+
+    async def finish_launch(self, account, appid, actual):
+        return await self._call('finish_launch', account, appid, actual)
+
     async def update(self):
         # Separate systemd job survives Decky restarting after plugin files are replaced.
         try:

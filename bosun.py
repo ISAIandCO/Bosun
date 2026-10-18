@@ -206,6 +206,7 @@ def main():
     sub.add_parser('reconcile')
     sub.add_parser('recover')
     sub.add_parser('broker')
+    sub.add_parser('tools', help='Install missing native MangoHud for benchmark logging')
     for verb in ['apply', 'session-start']:
         p = sub.add_parser(verb)
         p.add_argument('profile')
@@ -293,6 +294,10 @@ def main():
     if args.action == 'status':
         print(json.dumps(engine.report(), indent=2, ensure_ascii=False))
         return 0
+    if args.action == 'tools':
+        from bosun.control import Control
+        emit(Control(system).measurement_tools()['notes'])
+        return 0
     with engine.locked():
         if args.action == 'recover':
             emit(engine.recover())
@@ -310,6 +315,9 @@ def main():
             settings.pop(args.key, None)
             if args.key == 'governor':
                 settings.pop('epp', None)
+            if args.key in {'dirty_background_mib', 'dirty_mib'}:
+                settings.pop('dirty_background_mib', None)
+                settings.pop('dirty_mib', None)
             name = engine.state['profile'] + ':custom'
         elif args.action == 'reconcile':
             settings, name = engine.state['desired'], engine.state['profile']
@@ -323,6 +331,9 @@ def main():
             name = engine.state['session']['previous']['profile']
         if args.action in {'apply', 'disable'} and engine.state.get('session') and not stale_session:
             raise BosunError('A game session is active; close it before switching global profiles')
+        if args.action == 'rollback' and not args.dry_run:
+            from bosun.control import Control
+            Control(system).check_launch_rollback()
         notes, conflict = engine.apply(name, settings, dry=getattr(args, 'dry_run', False),
                                        automatic=args.action == 'reconcile')
         emit(notes)

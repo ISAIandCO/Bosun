@@ -8,7 +8,7 @@ import re
 import tempfile
 import urllib.request
 
-from .core import BosunError, STATE, atomic
+from .core import BOOT_KEYS, BosunError, STATE, atomic
 
 
 def fetch(url, limit=100 * 1024 * 1024):
@@ -56,6 +56,10 @@ def install_package(system, candidates, executable):
 
 def ensure_for(system, settings):
     messages = []
+    if settings.get('home_noatime') is not None and (not system.which('mount') or not system.which('findmnt')):
+        # In fixtures there is no host mount tool: never install into a synthetic /sys.
+        if not system.fake:
+            messages.append(install_package(system, ['util-linux'], 'findmnt'))
     if settings.get('lavd') and not system.which('scx_lavd') and system.path('/sys/kernel/sched_ext/state').exists() and system.path('/sys/kernel/btf/vmlinux').exists():
         messages.append(install_package(system, ['scx-scheds', 'scx'], 'scx_lavd'))
     if any(k in settings for k in ['zram_algorithm', 'zram_size_percent']):
@@ -66,7 +70,7 @@ def ensure_for(system, settings):
                 messages.append('SKIP zram dependency: active zram uses another implementation; no live replacement')
             else:
                 messages.append(install_package(system, ['zram-generator'], 'zram-generator'))
-    if any(k in settings for k in ['mitigations', 'moverate', 'workqueue_power_efficient']):
+    if (BOOT_KEYS - {'lbpw'}).intersection(settings):
         if not system.which('grub-mkconfig') or not system.which('grub-script-check'):
             messages.append(install_package(system, ['grub'], 'grub-mkconfig'))
     return messages

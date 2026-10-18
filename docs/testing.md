@@ -2,7 +2,7 @@
 
 ## Фактически проверено
 
-В версии 0.2: 78 Python-тестов и 5 frontend event-тестов проходят локально; TypeScript проверен, Decky bundle собирается. Физический Steam Deck в среде разработки отсутствует. Ни прирост FPS, ни снижение мощности, ни аппаратная совместимость LCD/OLED не измерены. DMI-модели и sysfs-интерфейсы проверены на изолированных fixtures. Это проверка логики программы, а не эмуляция драйверов GPU/SMU или доказательство загрузки реальной SteamOS.
+В версии 0.3: 106 Python-тестов и 11 frontend-тестов проходят локально; TypeScript проверен, Decky bundle собирается. Физический Steam Deck в среде разработки отсутствует. Ни прирост FPS, ни снижение мощности, ни аппаратная совместимость LCD/OLED не измерены. DMI-модели и sysfs-интерфейсы проверены на изолированных fixtures. Это проверка логики программы, а не эмуляция драйверов GPU/SMU или доказательство загрузки реальной SteamOS.
 
 ```bash
 python3 -m unittest discover -s tests -v
@@ -10,7 +10,7 @@ python3 -m py_compile bosun.py install.py bosun/*.py decky/main.py
 npm --prefix decky ci --ignore-scripts
 npm --prefix decky run check
 npm --prefix decky run build
-node --test decky/tests/events.test.cjs
+node --test decky/tests/*.test.cjs
 ```
 
 Проверки охватывают preview без записи, реальные записи в изолированное дерево `/proc`/`sys`/`etc`/EFI, идемпотентность, точный откат исходных значений, отсутствие/неподдерживаемые параметры, LCD/OLED/неизвестную модель, swappiness с zram/disk swap, CPU/EPP/cap, TDP hardware bounds, GPU/SD policy, scheduler lifecycle, частичный сбой, journal recovery и его конфликт, загрузочный override, ошибку генератора, сохранение режима read-only, reboot/update baseline, resume без гонки со Steam, установку/обновление/удаление и game-session helper.
@@ -33,6 +33,14 @@ Boot generator/SMU/BPF в fixtures не исполняются. Shell-фрагм
 10. На следующем обычном обновлении SteamOS проверить pause автоматического replay, preview и новое явное применение. Не обновлять/откатывать систему только ради этого теста.
 11. Проверить автоматическую установку Decky при его отсутствии, сохранение чужих плагинов, загрузку официального бинарника/digest и появление интерфейса после возвращения в Gaming Mode. Проверить LAVD на устройстве без пакета: получение native provider, план без upgrades/downgrades и возврат RO при сетевой/пакетной ошибке.
 12. Uninstall должен сначала завершить rollback, а при внешнем конфликте сохранить приложение и объяснить причину. Проверить отсутствие активных Bosun units после удаления.
+
+Дополнительная приёмка 0.3:
+
+* Проверить `/home` source/fstype/atime до и после apply/rollback; остальные flags сохраняются. Уже noatime — no-op. На отличающейся схеме mount — SKIP.
+* Проверить zswap при zram-only и disk fallback; никакого swapoff/restart занятой zram. Zram compressor/size — после reboot.
+* Проверить смену LAVD режима без зависания/старого unit; rollback возвращает старое состояние.
+* Для Steam и non-Steam игры прочитать/изменить launch options через Decky, перезапустить игру, подтвердить env/affinity/I/O обычного пользователя. Убедиться, что HDR/graphics/cap не изменены. Проверить повтор preset, ручной editor, внешний конфликт, pending recovery, смену Steam-аккаунта и восстановление оригинала. Не считать mocked API доказательством совместимости реального Steam клиента.
+* Writeback: проверить и bytes, и ratio после apply/rollback; memlock проверять после нового login/reboot, без перезапуска активной игровой сессии. Scheduler-specific queue tunables: выбрать scheduler, затем применить tuning; повторить на microSD и убедиться, что LCD eMMC исключён.
 
 ## Сопоставимый A/B-тест
 
@@ -64,7 +72,7 @@ bosun capture --seconds 300 --metadata ~/bosun-test.json --output ~/bosun-bench/
 
 ## Запись кадров MangoHud
 
-Используйте уже установленный MangoHud. Для Proton/Vulkan в Steam launch options можно добавить:
+Подготовьте native MangoHud кнопкой Decky или `bosun tools`: отсутствующий пакет установится автоматически, существующая версия сохранится. Для Flatpak runtime могут потребоваться соответствующие runtime extensions; Bosun не заменяет Flatpak graphics stack. Для Proton/Vulkan в Steam launch options можно добавить:
 
 ```text
 MANGOHUD=1 MANGOHUD_CONFIG=autostart_log=1,log_interval=0,log_duration=300,output_folder=/home/deck/bosun-bench %command%

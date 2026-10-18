@@ -34,8 +34,8 @@ class FakeSystem(System):
         if args[0] == 'systemctl':
             if args[1] == 'is-active':
                 return self.services.get(args[2], 'inactive')
-            if args[1] in {'start', 'stop'}:
-                self.services[args[2]] = 'active' if args[1] == 'start' else 'inactive'
+            if args[1] in {'start', 'restart', 'stop'}:
+                self.services[args[2]] = 'inactive' if args[1] == 'stop' else 'active'
         return ''
 
     def regenerate_boot(self, expected):

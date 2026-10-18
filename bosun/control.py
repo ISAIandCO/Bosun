@@ -5,10 +5,11 @@ from pathlib import Path
 import re
 import uuid
 
-from .core import CATALOG, POWER, PROFILES, STATE, BosunError, Change, Engine, atomic, plan, validate
+from .core import CATALOG, GLOBAL_KEYS, POWER, PROFILES, STATE, BosunError, Change, Engine, atomic, plan, validate
 from .sessions import session_action
+from .launch import account_key, compose
 
-REBOOT_KEYS = {'mitigations', 'moverate', 'lbpw', 'workqueue_power_efficient', 'zram_algorithm', 'zram_size_percent', 'lavd', 'smt'}
+REBOOT_KEYS = GLOBAL_KEYS
 
 
 class Control:
@@ -103,6 +104,8 @@ class Control:
             engine.recover()
             removed = engine.release(key)
             keys = {'governor', 'epp'} if key in {'governor', 'epp'} else {key}
+            if key in {'dirty_background_mib', 'dirty_mib'}:
+                keys = {'dirty_background_mib', 'dirty_mib'}
             session = engine.state.get('session')
             if session and session.get('owner') == 'decky':
                 for k in keys:
@@ -119,6 +122,7 @@ class Control:
     def rollback(self):
         engine = Engine(self.system)
         with engine.locked():
+            self.check_launch_rollback()
             notes, conflict = engine.apply('stock', {})
             if not conflict:
                 engine.state.pop('session', None)
@@ -127,6 +131,76 @@ class Control:
                 config['automatic'] = False
                 self.write_config(config)
         return {'notes': notes, 'conflict': conflict}
+
+    def measurement_tools(self):
+        from .dependencies import install_package
+        engine = Engine(self.system)
+        with engine.locked():
+            self.system.check_device()
+            note = ('MangoHud is already installed' if self.system.which('mangohud') else
+                    install_package(self.system, ['mangohud'], 'mangohud'))
+        return {'notes': [note, 'See docs/testing.md for per-frame logging and battery A/B measurement.']}
+
+    def check_launch_rollback(self):
+        if self.config().get('launch_options'):
+            raise BosunError('Restore Steam launch options in Decky → Bosun first (all affected Steam accounts). System journal and application retained.')
+
+    def preview_launch(self, account, appid, current, options):
+        key = account_key(account, appid)
+        if not isinstance(current, str) or len(current) > 8192 or '\x00' in current:
+            raise BosunError('Invalid current launch text')
+        saved = self.config().get('launch_options', {}).get(key)
+        original = saved['original'] if saved else current
+        if saved and current not in {saved['last'], original}:
+            raise BosunError('Launch options changed outside Bosun; keep the external value or restore explicitly')
+        return compose(self.system, original, options)
+
+    def prepare_launch(self, account, appid, current, target, mode='write', options=None):
+        key = account_key(account, appid)
+        if not isinstance(mode, str) or mode not in {'write', 'restore', 'keep'}:
+            raise BosunError('Invalid launch operation')
+        if any(not isinstance(s, str) or len(s) > 8192 or '\x00' in s for s in [current, target]):
+            raise BosunError('Invalid launch text')
+        engine = Engine(self.system)
+        with engine.locked():
+            self.system.check_device()
+            config = self.config()
+            entries = config.setdefault('launch_options', {})
+            saved = entries.get(key)
+            if mode == 'keep':
+                entries.pop(key, None)
+                self.write_config(config)
+                return {'target': current, 'notes': ['External Steam launch options retained; ownership released']}
+            if saved and current not in {saved['last'], saved['original']}:
+                raise BosunError('Launch options changed outside Bosun; refusing overwrite')
+            original = saved['original'] if saved else current
+            notes = []
+            if mode == 'restore':
+                target = original
+            elif options is not None:
+                result = compose(self.system, original, options, install=True)
+                target, notes = result['target'], result['notes']
+            # Save before Steam API mutation; an interrupted frontend can restore it later.
+            entries[key] = {'account': account, 'appid': appid, 'original': original,
+                            'last': target, 'restoring': mode == 'restore', 'pending': True}
+            self.write_config(config)
+        return {'target': target, 'notes': notes}
+
+    def finish_launch(self, account, appid, actual):
+        key = account_key(account, appid)
+        engine = Engine(self.system)
+        with engine.locked():
+            config = self.config()
+            entries = config.get('launch_options', {})
+            saved = entries.get(key)
+            if not saved or actual != saved['last']:
+                raise BosunError('Steam did not confirm the expected launch options; recovery record retained')
+            if saved['restoring'] or saved['original'] == actual:
+                entries.pop(key)
+            else:
+                saved['pending'] = False
+            self.write_config(config)
+        return {'notes': ['Steam launch options verified']}
 
     def activate(self, appid, resume=False):
         appid = str(appid or '')

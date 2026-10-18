@@ -13,16 +13,19 @@ import shutil
 import subprocess
 import tempfile
 import time
+from . import tweaks
 
-VERSION = '0.2.0'
+VERSION = '0.3.0'
 APP = '/home/.bosun/app'
 STATE = '/home/.bosun/state'
 BOOT = '/etc/default/grub.d/zz-bosun.cfg'
 ZRAM = '/etc/systemd/zram-generator.conf.d/90-bosun.conf'
 POWER = {'governor', 'epp', 'boost', 'smt', 'cpu_max_mhz', 'tdp_w', 'gpu_mode'}
+BOOT_KEYS = {'mitigations', 'moverate', 'lbpw', 'workqueue_power_efficient'} | tweaks.EXTRA_BOOT
+GLOBAL_KEYS = BOOT_KEYS | tweaks.GLOBAL_EXTRA | {'zram_algorithm', 'zram_size_percent', 'lavd', 'smt'}
 RECOMMENDED = {
     'mitigations': 'off', 'nmi_watchdog': 0, 'zram_page_cluster': 0,
-    'mglru': 'on', 'thp_defrag': 'defer+madvise',
+    'mglru': 'full', 'thp_defrag': 'defer+madvise', 'home_noatime': 1, 'zswap': 'off',
 }
 PROFILES = {
     'recommended': RECOMMENDED,
@@ -30,6 +33,12 @@ PROFILES = {
     'gpu-game': {'governor': 'powersave', 'epp': 'balance_power', 'cpu_max_mhz': 2800},
     'battery': {'governor': 'powersave', 'epp': 'balance_power', 'boost': 0},
     'memory-pressure': {'swappiness': 150, 'zram_page_cluster': 0, 'mglru': 'on'},
+    'memory-throughput': {'mglru': 'full', 'thp': 'always', 'thp_shmem': 'within_size',
+                          'compaction_proactiveness': 0, 'page_lock_unfairness': 8},
+    'streaming': {'dirty_background_mib': 200, 'dirty_mib': 400, 'vfs_cache_pressure': 50},
+    'io-throughput': {'nvme_wbt_lat_usec': 0, 'sd_wbt_lat_usec': 0, 'sd_bfq_slice_idle_us': 0},
+    'background-overhead': {'nmi_watchdog': 0, 'soft_watchdog': 0, 'hung_task_timeout_secs': 0,
+                            'vm_stat_interval': 15, 'ksm': 0},
     'stock': {},
 }
 # Values are candidates for A/B testing, never measured Deck performance claims.
@@ -37,7 +46,7 @@ CATALOG = {
     'mitigations': ('off', 'Boot: disable software CPU vulnerability mitigations; reboot required.'),
     'nmi_watchdog': ('0|1', 'Hard-lockup detector perf interrupt; 0 removes it, reduces hang diagnostics.'),
     'zram_page_cluster': ('0..3', 'Swap readahead exponent; only when highest-priority swap is zram.'),
-    'mglru': ('on|off', 'Reclaim generations; change only main bit, preserve optional bits.'),
+    'mglru': ('on|full|off', 'on changes main bit; full enables all three documented components and preserves other bits.'),
     'thp_defrag': ('always|defer|defer+madvise|madvise|never', 'Allocation compaction policy; stalls vs huge-page coverage.'),
     'thp': ('always|madvise|never', 'Experimental huge-page allocation policy.'),
     'swappiness': ('0..200', 'Experimental relative reclaim cost; >100 requires active zram here.'),
@@ -58,8 +67,9 @@ CATALOG = {
     'zram_algorithm': ('lz4|lzo-rle|zstd', 'Reboot-only compressor override; never live swapoff.'),
     'zram_size_percent': ('25..200', 'Reboot-only virtual zram capacity as percent of RAM, not RAM reservation.'),
     'workqueue_power_efficient': ('0|1', 'Experimental boot WQ_POWER_EFFICIENT consolidation; may trade latency for fewer wakeups.'),
-    'lavd': ('autopilot', 'Experimental installed scx_lavd; kernel/BTF required, no other scx owner.'),
+    'lavd': ('autopilot|balanced|powersave|performance', 'Experimental installed scx_lavd mode; kernel/BTF required, no other scx owner.'),
 }
+CATALOG.update(tweaks.CATALOG)
 
 
 class BosunError(RuntimeError):
@@ -190,6 +200,11 @@ class System:
                 'scx': self.read('/sys/kernel/sched_ext/state'),
                 'scx_ops': self.read('/sys/kernel/sched_ext/root/ops'),
                 'amdgpu': {k: self.read('/sys/module/amdgpu/parameters/' + k) for k in ['moverate', 'lbpw']},
+                'extra_runtime': {k: self.read(spec[0]) for k, spec in tweaks.SCALARS.items()},
+                'home_mount': tweaks.mount_info(self),
+                'cpu_mode': self.read('/sys/devices/system/cpu/amd_pstate/status'),
+                'gpu_sched_policy': self.read('/sys/module/gpu_sched/parameters/sched_policy'),
+                'epp_boost': self.read('/sys/module/amd_pstate/parameters/epp_boost'),
                 'runtime': {p: self.read(p) for p in [
                     '/proc/sys/kernel/nmi_watchdog', '/proc/sys/vm/page-cluster', '/proc/sys/vm/swappiness',
                     '/proc/sys/vm/compaction_proactiveness', '/sys/module/workqueue/parameters/power_efficient',
@@ -232,7 +247,7 @@ class System:
     def boot_target(self):
         # Use the SteamOS wrapper's configured EFI destination, never guess a PC GRUB path.
         wrapper = self.read('/usr/bin/update-grub', '')
-        match = re.search(r'^\s*file=(/efi/[A-Za-z0-9_./-]+)\s*$', wrapper, re.M)
+        match = re.search(r'^\s*file=((?:/boot)?/efi/[A-Za-z0-9_./-]+)\s*$', wrapper, re.M)
         if not match or '..' in Path(match[1]).parts:
             raise BosunError('Unsupported update-grub layout: cannot identify SteamOS EFI grub.cfg target')
         target = match[1]
@@ -288,12 +303,24 @@ class Change:
             return p.read_text() if p.exists() else None
         if self.kind == 'service':
             return system.command('systemctl', 'is-active', self.path, check=False) or 'inactive'
+        if self.key == 'home_noatime':
+            info = tweaks.mount_info(system)
+            return tweaks.atime_flags(info) if info else None
+        if self.key in {'dirty_background_mib', 'dirty_mib'}:
+            return json.dumps([int(system.read(self.path, '0')), int(system.read(self.path.replace('_bytes', '_ratio'), '0'))])
         raw = selected(system.read(self.path, ''))
+        if self.key == 'zswap':
+            return 'Y' if raw.lower() in {'1', 'y', 'yes', 'true'} else 'N'
+        if self.key == 'swap_vma_readahead':
+            return 'true' if raw.lower() in {'1', 'y', 'yes', 'true'} else 'false'
         return hex(int(raw, 0)) if self.key == 'mglru' and raw else raw
 
     def identity(self, system):
         if self.kind != 'scalar':
             return self.path
+        if self.key == 'home_noatime':
+            info = tweaks.mount_info(system)
+            return ':'.join(str(info.get(k)) for k in ['target', 'source', 'fstype']) if info else 'unmounted'
         resolved = str(system.path(self.path).resolve())
         resolved = re.sub(r'/hwmon/hwmon[0-9]+/', '/hwmon/', resolved)
         if '/sys/block/mmcblk' in self.path:
@@ -311,7 +338,24 @@ class Change:
                 atomic(system.path(self.path), value, 0o644)
         elif self.kind == 'service':
             system.command('systemctl', 'daemon-reload')
-            system.command('systemctl', 'start' if value == 'active' else 'stop', self.path)
+            action = 'restart' if value == 'active' and self.current(system) == 'active' else 'start' if value == 'active' else 'stop'
+            system.command('systemctl', action, self.path)
+        elif self.key == 'home_noatime':
+            if not re.fullmatch(r'(noatime|relatime|strictatime),(no)?diratime', value):
+                raise BosunError('Invalid saved mount policy')
+            info = tweaks.mount_info(system)
+            if info is None:
+                raise BosunError('/home mount disappeared')
+            kept = [flag for flag in info['vfs-options'].split(',') if flag not in {'atime', 'noatime', 'relatime', 'strictatime', 'nodiratime', 'diratime'}]
+            # Both source and target avoid merging stale /etc/fstab flags into the remount.
+            system.command('mount', '-o', ','.join(['remount', *kept, value]), info['source'], '/home')
+        elif self.key in {'dirty_background_mib', 'dirty_mib'}:
+            byte_count, ratio = json.loads(value)
+            path, target = (self.path, byte_count) if byte_count else (self.path.replace('_bytes', '_ratio'), ratio)
+            with system.path(path).open('w') as f:
+                f.write(str(target) + '\n')
+            if system.fake:
+                system.path(self.path.replace('_bytes', '_ratio') if byte_count else self.path).write_text('0\n')
         else:
             with system.path(self.path).open('w') as f:
                 f.write(str(value) + '\n')
@@ -329,9 +373,22 @@ def validate(settings):
               'nvme_readahead_kb': (0, 4096), 'sd_readahead_kb': (0, 4096),
               'zram_size_percent': (25, 200), 'workqueue_power_efficient': (0, 1)}
     enums = {'mitigations': ['off'], 'mglru': ['on', 'off'], 'smt': ['on', 'off'],
-             'gpu_mode': ['auto', 'low', 'high'], 'lavd': ['autopilot'],
+             'gpu_mode': ['auto', 'low', 'high'], 'lavd': ['autopilot', 'balanced', 'powersave', 'performance'],
              'thp': ['always', 'madvise', 'never'], 'zram_algorithm': ['lz4', 'lzo-rle', 'zstd'],
              'thp_defrag': ['always', 'defer', 'defer+madvise', 'madvise', 'never']}
+    bounds.update(tweaks.BOUNDS)
+    enums.update(tweaks.ENUMS)
+    enums['mglru'].append('full')
+    for key in settings:
+        for prefix, scheduler in [('nvme_kyber_', 'kyber'), ('sd_bfq_', 'bfq')]:
+            device = prefix.split('_')[0]
+            if key.startswith(prefix) and device + '_scheduler' in settings and settings[device + '_scheduler'] != scheduler:
+                raise BosunError(f'{key} requires {device}_scheduler={scheduler}')
+    pair = {'dirty_background_mib', 'dirty_mib'}
+    if pair.intersection(settings) and (not pair.issubset(settings) or
+            type(settings['dirty_background_mib']) is not int or type(settings['dirty_mib']) is not int or
+            settings['dirty_background_mib'] >= settings['dirty_mib']):
+        raise BosunError('Set dirty_background_mib and dirty_mib together; background must be lower')
     for key, value in settings.items():
         if key not in CATALOG:
             raise BosunError('Unknown setting: ' + key)
@@ -359,7 +416,7 @@ def boot_content(args):
 
 def plan(system, settings, managed=()):
     validate(settings)
-    changes, skipped = [], []
+    changes, skipped = tweaks.extra_plan(system, settings)
     policies = system.glob('/sys/devices/system/cpu/cpufreq/policy[0-9]*')
     conflicts = system.power_conflicts() if POWER.intersection(settings) else []
     swaps = [line.split() for line in system.read('/proc/swaps', '').splitlines()[1:] if line.split()]
@@ -376,10 +433,19 @@ def plan(system, settings, managed=()):
             changes.append(Change(key, path, str(value), choices=tuple(choices)))
 
     for key, value in settings.items():
+        if key in tweaks.CATALOG and key not in tweaks.EXTRA_BOOT:
+            continue
         if key in POWER and conflicts:
             skipped.append(f'{key}: another power manager detected: {", ".join(conflicts)}; disable it for Bosun power profiles')
             continue
-        if key in {'mitigations', 'moverate', 'lbpw', 'workqueue_power_efficient'}:
+        if key in BOOT_KEYS:
+            if key in tweaks.EXTRA_BOOT:
+                args = tweaks.boot_arg(system, key, value)
+                if args:
+                    bootargs.extend(args)
+                else:
+                    skipped.append(f'SKIP {key}: required kernel/CPPC interface unavailable')
+                continue
             if key == 'lbpw':
                 skipped.append('lbpw: upstream implementation is limited to GFX9 IPs; Steam Deck LCD/OLED use RDNA2, so this tweak is not applied')
                 continue
@@ -411,7 +477,7 @@ def plan(system, settings, managed=()):
                 skipped.append('mglru: kernel lacks CONFIG_LRU_GEN')
             else:
                 current = int(raw, 0)
-                add(key, path, hex((current | 1) if value == 'on' else (current & ~1)))
+                add(key, path, hex((current | (7 if value == 'full' else 1)) if value != 'off' else (current & ~1)))
         elif key in {'thp', 'thp_defrag'}:
             path = '/sys/kernel/mm/transparent_hugepage/' + ('enabled' if key == 'thp' else 'defrag')
             choices = re.sub(r'[\[\]]', '', system.read(path, '')).split()
@@ -498,10 +564,10 @@ def plan(system, settings, managed=()):
             elif any(system.command('systemctl', 'is-active', u, check=False) == 'active'
                      for u in ['scx.service', 'scx_loader.service', 'scx-loader.service', 'ananicy-cpp.service']):
                 skipped.append('lavd: competing scheduler/priority manager active')
-            elif not system.fake and '--autopilot' not in system.command(binpath, '--help'):
-                skipped.append('lavd: installed binary lacks --autopilot')
+            elif not system.fake and '--' + value not in system.command(binpath, '--help'):
+                skipped.append('lavd: installed binary lacks --' + value)
             else:
-                unit = '[Unit]\nDescription=Bosun experimental LAVD\n[Service]\nType=simple\nExecStart=' + binpath + ' --autopilot\nRestart=no\n'
+                unit = '[Unit]\nDescription=Bosun experimental LAVD\n[Service]\nType=simple\nExecStart=' + binpath + ' --' + value + '\nRestart=no\n'
                 changes.extend([Change(key, '/etc/systemd/system/bosun-lavd.service', unit, 'file'),
                                 Change(key, 'bosun-lavd.service', 'active', 'service')])
     if any(k in settings for k in ['zram_algorithm', 'zram_size_percent']):
@@ -571,20 +637,28 @@ class Engine:
             return []
         conflicts = []
         ordered = list(reversed(pending['writes']))
-        ordered.sort(key=lambda item: item['change']['key'] != 'governor')
+        def recovery_order(item):
+            c = item['change']
+            if c['key'] == 'governor':
+                return 0
+            if c['kind'] == 'service':
+                return 4 if item['before'] == 'active' else 1
+            return 2 if c['kind'] == 'file' else 3
+        ordered.sort(key=recovery_order)
         # Check the whole recovery set before a governor can reset a foreign EPP.
         for item in ordered:
             c = Change(**item['change'])
-            if c.current(self.sys) not in (item['before'], c.value):
+            current = c.current(self.sys)
+            if current not in (item['before'], c.value) and not (c.kind == 'service' and current == 'failed'):
                 conflicts.append(c.path)
         if conflicts:
             raise BosunError('Interrupted transaction recovery conflicts (state retained): ' + '; '.join(conflicts))
         for item in ordered:
             change = Change(**item['change'])
             current = change.current(self.sys)
-            if current == item['before']:
+            if current == item['before'] and not item.get('reconfigure'):
                 continue
-            if current != change.value:
+            if current != change.value and not item.get('reconfigure') and not (change.kind == 'service' and current == 'failed'):
                 conflicts.append(change.path)
                 continue
             try:
@@ -616,8 +690,11 @@ class Engine:
                     raise
                 with self.sys.writable():
                     change.put(self.sys, value)
+        if change.kind != 'service' and change.current(self.sys) != value:
+            raise BosunError(f'{change.path}: write did not produce the requested value; transaction retained for recovery')
 
     def apply(self, name, settings, dry=False, automatic=False):
+        validate(settings)
         self.sys.check_device()
         if not dry:
             self.recover()
@@ -629,7 +706,7 @@ class Engine:
         if automatic:
             owned = {e['change']['key'] for e in self.state['entries'].values()}
             if 'boot' in owned:
-                owned.update({'mitigations', 'moverate', 'lbpw', 'workqueue_power_efficient'})
+                owned.update(BOOT_KEYS)
             if 'zram_config' in owned:
                 owned.update({'zram_algorithm', 'zram_size_percent'})
             replay = {k: v for k, v in settings.items() if k in owned}
@@ -641,8 +718,9 @@ class Engine:
         if automatic and updated:
             return ['SteamOS/kernel changed: automatic replay paused. Open Bosun, preview and apply to accept new baseline.'], True
         desired = {c.id: c for c in changes}
+        lavd_reconfigure = any(c.key == 'lavd' and c.kind == 'file' and c.current(self.sys) != c.value for c in changes)
         requested = set(settings)
-        if requested.intersection({'mitigations', 'moverate', 'lbpw', 'workqueue_power_efficient'}):
+        if requested.intersection(BOOT_KEYS):
             requested.add('boot')
         if requested.intersection({'zram_algorithm', 'zram_size_percent'}):
             requested.add('zram_config')
@@ -715,7 +793,7 @@ class Engine:
                 notes.append(f'CONFLICT {c.path}: pre-existing file is not owned by Bosun')
                 continue
             governor_changes = any(other.key == 'governor' and other.current(self.sys) != other.value for other in changes)
-            if current != c.value or (c.key == 'epp' and governor_changes):
+            if current != c.value or (c.key == 'epp' and governor_changes) or (c.key == 'lavd' and c.kind == 'service' and lavd_reconfigure):
                 actions.append((c, current, c.value, 'set'))
             elif entry:
                 actions.append((c, current, current, 'keep'))
@@ -729,7 +807,8 @@ class Engine:
         oldstate = json.loads(json.dumps(self.state))
         oldstate['pending'] = None
         governor_mutating = any(c.key == 'governor' and before != after for c, before, after, _ in actions)
-        writes = [{'change': dataclasses.asdict(dataclasses.replace(c, value=after)), 'before': before}
+        writes = [{'change': dataclasses.asdict(dataclasses.replace(c, value=after)), 'before': before,
+                   'reconfigure': c.key == 'lavd' and c.kind == 'service' and before == 'active' and lavd_reconfigure}
                   for c, before, after, action in actions if action == 'set' or
                   (action == 'remove' and (before != after or (c.key == 'epp' and governor_mutating)))]
         self.state['pending'] = {'state_before': oldstate, 'writes': writes}
@@ -763,7 +842,7 @@ class Engine:
         except BaseException:
             self.recover()
             raise
-        if any(c.path in {BOOT, ZRAM} and before != after for c, before, after, _ in actions):
+        if any((c.path in {BOOT, ZRAM} or c.key == 'memlock_kb') and before != after for c, before, after, _ in actions):
             notes.append('REBOOT REQUIRED: boot settings change only after reboot (also after rollback).')
         return notes, any('CONFLICT ' in n for n in notes)
 
@@ -772,6 +851,8 @@ class Engine:
         if key == 'boot':
             raise BosunError('Boot override cannot be released. Resolve its file conflict and rollback.')
         keys = {'governor', 'epp'} if key in {'governor', 'epp'} else {key}
+        if key in {'dirty_background_mib', 'dirty_mib'}:
+            keys = {'dirty_background_mib', 'dirty_mib'}
         removed = []
         for ident, entry in list(self.state['entries'].items()):
             if entry['change']['key'] in keys:

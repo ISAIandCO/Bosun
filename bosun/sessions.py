@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 import re
-from .core import BosunError, validate
+from .core import BosunError, GLOBAL_KEYS, validate
 
 
 def session_action(engine, action, name, token, overlay=None):
@@ -12,7 +12,7 @@ def session_action(engine, action, name, token, overlay=None):
             raise BosunError('Another game session exists; close it or recover using token from status')
         overlay = validate(overlay)
         current = dict(engine.state['desired'])
-        for key in ['mitigations', 'moverate', 'lbpw', 'lavd', 'smt', 'workqueue_power_efficient', 'zram_algorithm', 'zram_size_percent']:
+        for key in GLOBAL_KEYS:
             if key in overlay and overlay[key] != current.get(key):
                 raise BosunError('Game launch cannot change boot, scheduler or SMT. Use runtime-only game profiles.')
         previous = {'profile': engine.state['profile'], 'desired': current}
