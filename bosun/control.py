@@ -8,7 +8,7 @@ import uuid
 from .presentation import LABELS, group
 
 from .core import BOOT_KEYS, CATALOG, GLOBAL_KEYS, POWER, PROFILES, STATE, BosunError, Change, Engine, atomic, plan, validate
-from .sessions import session_action
+from .sessions import apply_global as apply_global_profile, session_action
 from .launch import account_key, compose
 
 REBOOT_KEYS = GLOBAL_KEYS
@@ -105,19 +105,14 @@ class Control:
                 if REBOOT_KEYS.intersection(checked):
                     raise BosunError('Game profiles accept runtime settings only')
                 checked = {**engine.state['desired'], **checked}
-            notes, conflicts = engine.apply('preview', checked, dry=True)
+            notes, conflicts = (engine.apply('preview', checked, dry=True) if game else
+                                apply_global_profile(engine, 'preview', checked, dry=True))
         return {'notes': notes, 'conflict': conflicts}
 
     def apply_global(self, name, settings):
         engine = Engine(self.system)
         with engine.locked():
-            stale = engine.state['boot_id'] != self.system.read('/proc/sys/kernel/random/boot_id', '')
-            if engine.state.get('session') and not stale:
-                raise BosunError('Close the game or stop its profile before changing the global profile')
-            notes, conflict = engine.apply(name, validate(settings))
-            if stale and not conflict:
-                engine.state.pop('session', None)
-                engine.save()
+            notes, conflict = apply_global_profile(engine, name, settings)
         return {'notes': notes, 'conflict': conflict}
 
     def release(self, key):

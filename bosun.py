@@ -16,7 +16,7 @@ import uuid
 
 from bosun.core import APP, STATE, CATALOG, PROFILES, POWER, VERSION, BosunError, Change, Engine, System, atomic, validate
 from bosun.measure import capture, frame_metrics
-from bosun.sessions import session_action
+from bosun.sessions import apply_global as apply_global_profile, session_action
 
 
 def profile_dir():
@@ -344,13 +344,14 @@ def main():
         if args.action == 'reconcile' and stale_session:
             settings = engine.state['session']['previous']['desired']
             name = engine.state['session']['previous']['profile']
-        if args.action in {'apply', 'disable'} and engine.state.get('session') and not stale_session:
-            raise BosunError('A game session is active; close it before switching global profiles')
         if args.action == 'rollback' and not args.dry_run:
             from bosun.control import Control
             Control(system).check_launch_rollback()
-        notes, conflict = engine.apply(name, settings, dry=getattr(args, 'dry_run', False),
-                                       automatic=args.action == 'reconcile')
+        if args.action in {'apply', 'disable'}:
+            notes, conflict = apply_global_profile(engine, name, settings, dry=getattr(args, 'dry_run', False))
+        else:
+            notes, conflict = engine.apply(name, settings, dry=getattr(args, 'dry_run', False),
+                                           automatic=args.action == 'reconcile')
         emit(notes)
         if stale_session and not conflict and not getattr(args, 'dry_run', False):
             engine.state.pop('session', None)

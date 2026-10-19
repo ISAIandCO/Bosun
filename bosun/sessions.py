@@ -3,6 +3,26 @@ import re
 from .core import BosunError, GLOBAL_KEYS, validate
 
 
+def apply_global(engine, name, settings, dry=False):
+    """An explicit device profile supersedes a Decky overlay, even after a lost exit event."""
+    session = engine.state.get('session')
+    stale = engine.state['boot_id'] != engine.sys.read('/proc/sys/kernel/random/boot_id', '')
+    if session and not stale and session.get('owner') != 'decky':
+        raise BosunError('CLI launcher owns the active profile; close it or end its session using the token from status')
+    # Apply directly from the overlay, retaining one transaction and the original journal
+    # values. A failure/conflict must keep the session so it can still be recovered.
+    notes, conflict = engine.apply(name, validate(settings), dry=dry)
+    if session and session.get('owner') == 'decky':
+        if dry:
+            notes.insert(0, 'При применении временный профиль Decky будет заменён глобальным; назначение игре сохранится.')
+        elif not conflict:
+            notes.insert(0, 'Временный профиль Decky заменён глобальным; назначение игре сохранено.')
+    if session and not dry and not conflict:
+        engine.state.pop('session', None)
+        engine.save()
+    return notes, conflict
+
+
 def session_action(engine, action, name, token, overlay=None):
     if not re.fullmatch('[0-9a-f]{32}', token):
         raise BosunError('Invalid session token')

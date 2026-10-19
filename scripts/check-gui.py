@@ -93,6 +93,18 @@ def check(screenshots):
         assert not Engine(fixture.s).state['entries']
         toggle.click()
 
+        # Desktop after a missed Steam exit: a persisted Decky record must not block
+        # the user's explicit global profile, and a late exit must not undo it.
+        control.automatic(True); control.activate('10')
+        window.loaded(control.state()); window.nav_buttons[0].click(); app.processEvents()
+        assert 'AppID 10' in window.summary.text()
+        click('Применить')
+        assert 'session' not in Engine(fixture.s).state
+        assert fixture.s.read('/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq') == '3500000'
+        control.activate('')
+        assert Engine(fixture.s).state['profile'] == 'recommended'
+        control.rollback(); window.loaded(control.state())
+
         # Real asynchronous request path, including cancellation. Window stays responsive;
         # denied authorization must retain the editor draft and show an error.
         window.request = Window.request.__get__(window)

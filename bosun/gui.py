@@ -437,6 +437,10 @@ class Window(QMainWindow):
             warnings.append('Другой менеджер питания: ' + ', '.join(state['power_conflicts']))
         self.summary.setText(f"Steam Deck {system['model']} · SteamOS {system['os'].get('VERSION_ID', '?')}\n"
                              f"Профиль: {report['profile']} · управляемых параметров: {len(report['managed'])}\n" + '\n'.join(warnings))
+        session = report.get('session')
+        if session and session.get('owner') == 'decky':
+            self.summary.setText(self.summary.text() + f"\nВременный профиль Decky: AppID {session.get('appid', '?')}. "
+                                 'Применение глобального профиля заменит это назначение.')
         for editor, game in [(self.system_editor, False), (self.game_editor, True)]:
             editor.configure(state, game)
         if first or not self.system_editor.dirty:
