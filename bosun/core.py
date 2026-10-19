@@ -15,7 +15,7 @@ import tempfile
 import time
 from . import tweaks
 
-VERSION = '0.3.3'
+VERSION = '0.3.4'
 APP = '/home/.bosun/app'
 STATE = '/home/.bosun/state'
 BOOT = '/etc/default/grub.d/zz-bosun.cfg'

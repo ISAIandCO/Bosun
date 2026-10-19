@@ -10,7 +10,7 @@ const Renderer = require('react-test-renderer');
 const { act } = Renderer;
 const copy = value => JSON.parse(JSON.stringify(value));
 
-async function fixture({ automatic = true, saveError = '', activationNotes = [] } = {}) {
+async function fixture({ automatic = true, saveError = '', activationNotes = [], built = false } = {}) {
   const calls = [], notices = [];
   const state = {
     report: { profile: 'stock', desired: {}, managed: [], update_pending: false, session: null,
@@ -39,6 +39,9 @@ async function fixture({ automatic = true, saveError = '', activationNotes = [] 
   };
   const window = new EventTarget();
   window.App = { m_CurrentUser: { strSteamID: '76561198000000001' } };
+  const api = { _version: 2, callable: name => (...args) => rpc(name, ...args), toaster: { toast: value => notices.push(value) } };
+  window.__DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit = { connect: () => api };
+  const SteamClient = { Apps: { RegisterForAppDetails: (_id, callback) => { callback({ strLaunchOptions: '%command%' }); return { unregister() {} }; } } };
   const ui = Object.fromEntries(['ButtonItem', 'DropdownItem', 'PanelSection', 'PanelSectionRow', 'SliderField', 'TextField', 'ToggleField'].map(name => [name, name]));
   ui.Router = { MainRunningApp: { appid: 123, display_name: 'Current' } };
   ui.staticClasses = {};
@@ -48,7 +51,7 @@ async function fixture({ automatic = true, saveError = '', activationNotes = [] 
     const module = { exports: {} }; cache.set(filename, module);
     const requireMock = name => {
       if (name === '@decky/ui') return ui;
-      if (name === '@decky/api') return { definePlugin: fn => fn, callable: name => (...args) => rpc(name, ...args), toaster: { toast: value => notices.push(value) } };
+      if (name === '@decky/api') return { definePlugin: fn => fn, ...api };
       if (name.startsWith('.')) {
         const base = path.resolve(path.dirname(filename), name);
         return load(['.ts', '.tsx'].map(ext => base + ext).find(fs.existsSync));
@@ -56,19 +59,32 @@ async function fixture({ automatic = true, saveError = '', activationNotes = [] 
       return require(name);
     };
     const code = ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2020 } }).outputText;
-    vm.runInNewContext(code, { module, exports: module.exports, require: requireMock, window, SteamClient: {}, Event, setTimeout, clearTimeout, console }, { filename });
+    vm.runInNewContext(code, { module, exports: module.exports, require: requireMock, window, SteamClient, Event, setTimeout, clearTimeout, console,
+      SP_REACT: React, SP_JSX: require('react/jsx-runtime'), DFL: ui }, { filename });
     return module.exports;
   };
-  const plugin = load(path.resolve(__dirname, '../src/index.tsx')).default();
+  const plugin = load(path.resolve(__dirname, built ? '../dist/index.js' : '../src/index.tsx')).default();
+  // Decky PluginView unmounts content when QAM hides unless alwaysRender is set.
+  // https://github.com/SteamDeckHomebrew/decky-loader/blob/67196ad/frontend/src/components/PluginView.tsx
+  const host = visible => React.createElement('PluginHost', null, React.createElement('PluginTitle'),
+    React.createElement('PluginBody', null, (visible || plugin.alwaysRender) && plugin.content));
   let view;
-  await act(async () => { view = Renderer.create(plugin.content); });
+  await act(async () => { view = Renderer.create(host(true)); });
+  const visible = async value => { await act(async () => { view.update(host(value)); }); };
   const field = (type, label) => view.root.findAllByType(type).find(n => n.props.label === label);
   const action = async text => {
     const node = view.root.findAllByType('ButtonItem').find(n => typeof n.props.children === 'string' && (typeof text === 'string' ? n.props.children === text : text.test(n.props.children)));
     assert.ok(node, 'Button not found: ' + text);
     await act(async () => { await node.props.onClick(); });
   };
-  return { state, calls, notices, field, action, text: () => JSON.stringify(view.toJSON()),
+  return { state, calls, notices, field, action, visible, buttons: () => view.root.findAllByType('ButtonItem'),
+    section: title => view.root.findAllByType('PanelSection').find(n => n.props.title === title), text: () => JSON.stringify(view.toJSON()),
+    dropdownModal: async (label, data) => {
+      const onChange = field('DropdownItem', label).props.onChange;
+      await visible(false);
+      await act(async () => { onChange({ data }); });
+      await visible(true);
+    },
     dropdown: async (label, data) => { await act(async () => { field('DropdownItem', label).props.onChange({ data }); }); },
     toggle: async (label, value) => { await act(async () => { field('ToggleField', label).props.onChange(value); }); },
     slider: async (label, value) => { await act(async () => { field('SliderField', label).props.onChange(value); }); },
@@ -180,3 +196,73 @@ test('discarding a draft reloads saved settings without applying it', async () =
     assert.equal(actions(), initial);
   } finally { await f.close(); }
 });
+
+for (const built of [false, true]) {
+  const target = built ? 'release bundle' : 'source';
+  test(`${target}: native dropdown QAM hide/show retains the field and sends its choice to the running game`, async () => {
+    const f = await fixture({ built });
+    try {
+      const control = f.field('DropdownItem', 'CPU governor');
+      const reads = f.calls.filter(c => c[0] === 'get_state').length;
+      await f.dropdownModal('CPU governor', 'performance');
+      assert.equal(f.field('DropdownItem', 'CPU governor').props.selectedOption, 'performance');
+      assert.equal(f.field('DropdownItem', 'CPU governor'), control, 'focus target must not be remounted');
+      await f.toggle('Управлять: TDP APU, W', true);
+      await f.slider('TDP APU, W', 9);
+      await f.visible(false);
+      await f.visible(true);
+      assert.equal(f.field('SliderField', 'TDP APU, W').props.value, 9);
+      assert.equal(f.calls.filter(c => c[0] === 'get_state').length, reads, 'hiding QAM must not reload the form');
+      await f.action('Прочитать параметры из Steam');
+      await f.dropdownModal('I/O приоритет процесса (best-effort)', 0);
+      assert.equal(f.field('DropdownItem', 'I/O приоритет процесса (best-effort)').props.selectedOption, 0);
+      await f.input('Текущая строка / редактирование', 'MANGOHUD=1 %command%');
+      await f.visible(false);
+      await f.visible(true);
+      assert.equal(f.field('TextField', 'Текущая строка / редактирование').props.value, 'MANGOHUD=1 %command%');
+      await f.action(/^Сохранить.*(игр|назнач)/);
+      assert.equal(f.state.report.desired.governor, 'performance');
+      assert.equal(f.state.report.desired.tdp_w, 9);
+    } finally { await f.close(); }
+  });
+
+  test(`${target}: actions use full-width layout in panel rows, including launch options and global controls`, async () => {
+    const f = await fixture({ built });
+    const check = () => {
+      for (const button of f.buttons()) {
+        assert.equal(button.props.layout, 'below', 'action must not reserve an empty label column: ' + button.props.children);
+        assert.equal(button.parent.type, 'PanelSectionRow', 'action needs a QAM row');
+      }
+    };
+    try {
+      await f.action('Прочитать параметры из Steam');
+      await f.dropdown('CPU governor', 'performance');
+      check();
+      await f.dropdown('Редактировать', 'global');
+      check();
+    } finally { await f.close(); }
+  });
+
+  test(`${target}: system readback displays actual CPU and TDP separately from the draft`, async () => {
+    const f = await fixture({ built });
+    try {
+      f.state.report.managed = [
+        { change: { key: 'cpu_max_mhz', kind: 'scalar' }, last: '2800000', actual: '3000000', matches: false },
+        { change: { key: 'tdp_w', kind: 'scalar' }, last: '9000000', actual: '9000000', matches: true },
+      ];
+      await f.toggle('Управлять: Предел CPU, MHz', true);
+      await f.slider('Предел CPU, MHz', 2400);
+      await f.action('Обновить фактическое состояние');
+      const actual = f.section('Фактическое состояние устройства');
+      const text = JSON.stringify(actual.findAllByType('div').map(n => n.children));
+      assert.ok(text.includes('2800 MHz') && text.includes('3000 MHz'), 'readback must use reported values, not the 2400 MHz draft');
+      assert.ok(text.includes('расхождение'));
+      assert.ok(text.includes('9 W') && text.includes('совпадает'));
+      assert.equal(f.field('SliderField', 'Предел CPU, MHz').props.value, 2400);
+      for (const button of actual.findAllByType('ButtonItem')) {
+        assert.equal(button.props.layout, 'below');
+        assert.equal(button.parent.type, 'PanelSectionRow');
+      }
+    } finally { await f.close(); }
+  });
+}

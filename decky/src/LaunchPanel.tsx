@@ -58,14 +58,14 @@ export function LaunchPanel({ appid, backups, refresh }: { appid: string; backup
     setBaselineKey(owner + ':' + appid);
     setLoaded(true); setMessage([...result.notes, 'Параметры проверены. Изменения действуют со следующего запуска игры.'].join('\n'));
   };
-  const choose = (key: string, label: string, values: [string | number | boolean, string][]) => <DropdownItem label={label}
+  const choose = (key: string, label: string, values: [string | number | boolean, string][]) => <PanelSectionRow><DropdownItem layout="below" label={label}
     selectedOption={options[key] ?? ''} disabled={busy} rgOptions={[{ data: '', label: 'Не задавать' }, ...values.map(([data, label]) => ({ data, label }))]}
-    onChange={o => setOptions(old => { const result = { ...old }; if (o.data === '') delete result[key]; else result[key] = o.data; return result; })} />;
+    onChange={o => setOptions(old => { const result = { ...old }; if (o.data === '') delete result[key]; else result[key] = o.data; return result; })} /></PanelSectionRow>;
   return <PanelSection title="Параметры запуска Steam — отдельно для игры">
     <PanelSectionRow>Игра запускается обычным пользователем. Графика, разрешение и HDR автоматически не меняются.</PanelSectionRow>
-    <ButtonItem disabled={busy || !appid} onClick={() => run(async () => { const owner = account(); const value = await current(); if (account() !== owner) throw new Error('Steam-аккаунт изменился'); setText(value.text); setBaseline(value.text); setBaselineKey(owner + ':' + appid); setLoaded(true); setMessage('Прочитано из Steam'); })}>Прочитать параметры из Steam</ButtonItem>
+    <PanelSectionRow><ButtonItem layout="below" disabled={busy || !appid} onClick={() => run(async () => { const owner = account(); const value = await current(); if (account() !== owner) throw new Error('Steam-аккаунт изменился'); setText(value.text); setBaseline(value.text); setBaselineKey(owner + ':' + appid); setLoaded(true); setMessage('Прочитано из Steam'); })}>Прочитать параметры из Steam</ButtonItem></PanelSectionRow>
     {loaded && <>
-      <TextField label="Текущая строка / редактирование" value={text} onChange={e => setText(e.target.value)} />
+      <PanelSectionRow><TextField label="Текущая строка / редактирование" value={text} onChange={e => setText(e.target.value)} /></PanelSectionRow>
       {choose('cache_gb', 'Лимит Mesa shader cache (не всех кешей Steam)', [1, 2, 4, 8, 16].map(n => [n, `${n} GiB на архитектуру`]))}
       {choose('sync', 'Синхронизация Proton', [['auto', 'Автовыбор Proton, убрать унаследованные запреты'], ['fsync', 'Обойти NTSYNC, разрешить Fsync при поддержке Proton/ядром']])}
       {choose('dxvk_latency', 'DXVK: максимум кадров в очереди', [1, 2, 3, 4].map(n => [n, String(n)]))}
@@ -73,14 +73,14 @@ export function LaunchPanel({ appid, backups, refresh }: { appid: string; backup
       {choose('radv_nir_cache', 'RADV NIR cache — только при поддержке драйвером', [[true, 'Включить']])}
       {choose('io_priority', 'I/O приоритет процесса (best-effort)', [[0, '0 — высокий'], [2, '2'], [4, '4 — обычный'], [7, '7 — низкий']])}
       {choose('affinity', 'CPU affinity игры без глобального отключения SMT', [['physical', 'Один поток на физическое ядро']])}
-      <ButtonItem disabled={busy} onClick={() => run(async () => { const before = await current(); const result = unpack(await preview(account(), appid, before.text, options)); setText(result.target!); setMessage(result.notes.join('\n') || 'Предпросмотр готов; изменений нет'); })}>Предпросмотр выбранных параметров</ButtonItem>
-      <ButtonItem disabled={busy} onClick={() => run(() => mutate('write', true))}>Применить выбранные параметры</ButtonItem>
-      <ButtonItem disabled={busy} onClick={() => run(() => mutate('write'))}>Сохранить отредактированную строку</ButtonItem>
+      <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => run(async () => { const before = await current(); const result = unpack(await preview(account(), appid, before.text, options)); setText(result.target!); setMessage(result.notes.join('\n') || 'Предпросмотр готов; изменений нет'); })}>Предпросмотр выбранных параметров</ButtonItem></PanelSectionRow>
+      <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => run(() => mutate('write', true))}>Применить выбранные параметры</ButtonItem></PanelSectionRow>
+      <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => run(() => mutate('write'))}>Сохранить отредактированную строку</ButtonItem></PanelSectionRow>
     </>}
     {backups[account() + ':' + appid] && <>
       <PanelSectionRow>{backups[account() + ':' + appid].pending ? 'Есть незавершённая запись: прочитайте строку Steam и повторите применение или восстановление.' : 'Исходная строка Steam сохранена для этого аккаунта.'}</PanelSectionRow>
-      <ButtonItem disabled={busy} onClick={() => run(() => mutate('restore'))}>Вернуть исходную строку Steam</ButtonItem>
-      <ButtonItem disabled={busy} onClick={() => run(() => mutate('keep'))}>Оставить внешнюю строку и снять владение</ButtonItem>
+      <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => run(() => mutate('restore'))}>Вернуть исходную строку Steam</ButtonItem></PanelSectionRow>
+      <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => run(() => mutate('keep'))}>Оставить внешнюю строку и снять владение</ButtonItem></PanelSectionRow>
     </>}
     {message && <PanelSectionRow><div style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 13 }}>{message}</div></PanelSectionRow>}
   </PanelSection>;
