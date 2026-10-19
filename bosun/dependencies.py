@@ -22,7 +22,7 @@ def fetch(url, limit=100 * 1024 * 1024):
     return data
 
 
-def install_package(system, candidates, executable):
+def install_package(system, candidates, executable, probe=()):
     if not system.which('pacman'):
         raise BosunError(f'Missing {executable}; SteamOS pacman unavailable')
     package = next((name for name in candidates if system.command('pacman', '-Si', name, check=False)), None)
@@ -44,8 +44,8 @@ def install_package(system, candidates, executable):
         if replacements:
             raise BosunError('Dependency installation would replace installed packages: ' + ', '.join(replacements) + '. Update SteamOS first; no packages changed.')
         system.command('pacman', '-S', '--noconfirm', package, timeout=240)
-    if not system.fake and not system.which(executable) and not (
-            executable == 'zram-generator' and system.path('/usr/lib/systemd/system-generators/zram-generator').exists()):
+    available = (system.command(*probe, check=False) == 'ready' if probe else system.which(executable)) if not system.fake else True
+    if not available and not (executable == 'zram-generator' and system.path('/usr/lib/systemd/system-generators/zram-generator').exists()):
         raise BosunError(f'{package} installed but {executable} is not available')
     history = system.path(STATE + '/dependencies.json')
     data = json.loads(history.read_text()) if history.exists() else []
@@ -74,6 +74,17 @@ def ensure_for(system, settings):
         if not system.which('grub-mkconfig') or not system.which('grub-script-check'):
             messages.append(install_package(system, ['grub'], 'grub-mkconfig'))
     return messages
+
+
+def ensure_desktop(system):
+    probe = ('/usr/bin/python3', '-c', 'from PySide6 import QtWidgets; print("ready")')
+    notes = []
+    if system.command(*probe, check=False) != 'ready':
+        # PySide tooling may be a separate package; only the actual QtWidgets import matters.
+        notes.append(install_package(system, ['pyside6', 'python-pyside6'], 'PySide6.QtWidgets', probe=probe))
+    if not system.which('pkexec'):
+        notes.append(install_package(system, ['polkit'], 'pkexec'))
+    return notes
 
 
 def decky_home(system, user_home):

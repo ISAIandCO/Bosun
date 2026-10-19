@@ -200,6 +200,8 @@ def main():
     parser.add_argument('--root', default='/', help=argparse.SUPPRESS)
     sub = parser.add_subparsers(dest='action')
     sub.add_parser('menu')
+    sub.add_parser('gui', help='Open the Desktop window')
+    sub.add_parser('desktop-rpc', help=argparse.SUPPRESS)
     sub.add_parser('status')
     sub.add_parser('catalog')
     sub.add_parser('profiles')
@@ -234,6 +236,19 @@ def main():
     p = sub.add_parser('analyze')
     p.add_argument('csv')
     args = parser.parse_args()
+    if args.action == 'gui':
+        from bosun.desktop import main as desktop_main
+        return desktop_main()
+    if args.action == 'desktop-rpc':
+        if os.geteuid() != 0:
+            raise BosunError('Desktop RPC requires root authorization')
+        from bosun.control import Control
+        from bosun.desktop import dispatch
+        raw = sys.stdin.read(65537)
+        if len(raw) > 65536:
+            raise BosunError('Desktop request too large')
+        print(json.dumps(dispatch(Control(System(args.root)), json.loads(raw)), ensure_ascii=False))
+        return 0
     if args.action in {None, 'menu'}:
         menu()
         return 0

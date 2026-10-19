@@ -5,8 +5,9 @@ from pathlib import Path
 import re
 import time
 import uuid
+from .presentation import LABELS, group
 
-from .core import CATALOG, GLOBAL_KEYS, POWER, PROFILES, STATE, BosunError, Change, Engine, atomic, plan, validate
+from .core import BOOT_KEYS, CATALOG, GLOBAL_KEYS, POWER, PROFILES, STATE, BosunError, Change, Engine, atomic, plan, validate
 from .sessions import session_action
 from .launch import account_key, compose
 
@@ -34,9 +35,30 @@ class Control:
     def state(self):
         engine = Engine(self.system)
         info = engine.report()
-        return {'report': info, 'config': self.config(), 'profiles': self.profiles(), 'catalog': CATALOG,
-                'runtime_keys': [key for key in CATALOG if key not in REBOOT_KEYS],
+        profiles = self.profiles()
+        runtime = [key for key in CATALOG if key not in REBOOT_KEYS]
+        games = {name: {k: v for k, v in settings.items() if k in runtime} for name, settings in profiles.items()}
+        return {'report': info, 'config': self.config(), 'profiles': profiles,
+                'game_profiles': {name: settings for name, settings in games.items() if settings or name == 'stock'},
+                'catalog': CATALOG, 'labels': LABELS, 'groups': {key: group(key) for key in CATALOG},
+                'reboot_keys': sorted(BOOT_KEYS | {'zram_algorithm', 'zram_size_percent', 'memlock_kb'}),
+                'runtime_keys': runtime,
                 'power_conflicts': self.system.power_conflicts()}
+
+    def save_profile(self, name, settings):
+        if not isinstance(name, str) or not re.fullmatch('[a-zA-Z0-9_-]{1,64}', name) or name in PROFILES:
+            raise BosunError('Имя своего профиля: 1–64 латинских букв, цифр, _ или -; встроенные имена заняты')
+        checked = validate(settings)
+        with Engine(self.system).locked():
+            atomic(self.system.path(STATE + '/profiles/' + name + '.json'), json.dumps({'schema': 1, 'settings': checked}, indent=2))
+        return {'notes': ['Профиль сохранён: ' + name]}
+
+    def remove_profile(self, name):
+        if not isinstance(name, str) or not re.fullmatch('[a-zA-Z0-9_-]{1,64}', name) or name in PROFILES:
+            raise BosunError('Можно удалить только свой профиль')
+        with Engine(self.system).locked():
+            self.system.path(STATE + '/profiles/' + name + '.json').unlink(missing_ok=True)
+        return {'notes': ['Профиль удалён: ' + name]}
 
     def save_game(self, appid, name, settings, resume=True):
         if not isinstance(appid, str) or not re.fullmatch('[1-9][0-9]{0,19}', appid):
@@ -62,7 +84,8 @@ class Control:
             config = self.config()
             config['games'].pop(appid, None)
             self.write_config(config)
-        return self.activate(appid)
+            active = (engine.state.get('session') or {}).get('appid') == appid
+        return self.activate(appid) if active else {'notes': ['Назначение игре удалено']}
 
     def automatic(self, enabled):
         if type(enabled) is not bool:

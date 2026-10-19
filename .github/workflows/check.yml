@@ -15,6 +15,10 @@ jobs:
           python-version: '3.11'
       - run: python3 -m py_compile bosun.py install.py bosun/*.py decky/main.py
       - run: sudo "$(command -v python3)" -m unittest discover -s tests -v
+      - name: Exercise native Desktop GUI with isolated backend
+        run: |
+          python3 -m pip install PySide6-Essentials==6.9.3
+          QT_QPA_PLATFORM=offscreen python3 scripts/check-gui.py
       - uses: actions/setup-node@v4
         with:
           node-version: '22'

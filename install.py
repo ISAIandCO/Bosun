@@ -19,8 +19,9 @@ REPO = 'ISAIandCO/Bosun'
 APP = Path('/home/.bosun/app')
 BASE = APP.parent
 FILES = ['bosun.py', 'bosun/__init__.py', 'bosun/core.py', 'bosun/measure.py', 'bosun/sessions.py', 'bosun/control.py', 'bosun/dependencies.py', 'bosun/tweaks.py', 'bosun/launch.py',
+         'bosun/desktop.py', 'bosun/gui.py', 'bosun/presentation.py',
          'install.py', 'README.md', 'LICENSE', 'docs/tweaks.md', 'docs/testing.md', 'docs/benchmark-metadata.json', 'docs/hardware-and-tweaks.md',
-         'docs/global-analysis.md', 'docs/catalog.md', 'docs/releases/0.3.5.md',
+         'docs/advanced.md', 'docs/global-analysis.md', 'docs/catalog.md', 'docs/releases/0.4.0.md', 'docs/screenshots/desktop.png',
          'decky/main.py', 'decky/plugin.json', 'decky/package.json', 'decky/dist/index.js',
          'decky/NOTICE', 'decky/LICENSES/Decky-LGPL-2.1.txt',
          'decky/third-party/loader-api/src/index.ts', 'decky/third-party/loader-api/src/types.ts',
@@ -74,7 +75,7 @@ def desktop_exec(args):
 
 def desktop_entry(args, name='Bosun'):
     return ('[Desktop Entry]\nType=Application\nName=' + name + '\nComment=Steam Deck performance per watt\n'
-            'Icon=steamdeck-gaming-return\nTerminal=true\nStartupNotify=false\nCategories=Game;Settings;\nExec='
+            'Icon=steamdeck-gaming-return\nTerminal=false\nStartupNotify=true\nCategories=Game;Settings;\nExec='
             + desktop_exec(args) + '\n')
 
 
@@ -116,8 +117,8 @@ def install(source, username, decky_enabled=True):
         raise RuntimeError('Installation belongs to another desktop user')
     wrappers = {
         str(homedir / '.local/bin/bosun'): '#!/bin/sh\nexec /usr/bin/python3 /home/.bosun/app/bosun.py "$@"\n',
-        str(homedir / '.local/share/applications/bosun.desktop'): desktop_entry(['/usr/bin/python3', str(APP / 'bosun.py'), 'menu']),
-        str(homedir / 'Desktop/Bosun.desktop'): desktop_entry(['/usr/bin/python3', str(APP / 'bosun.py'), 'menu']),
+        str(homedir / '.local/share/applications/bosun.desktop'): desktop_entry(['/usr/bin/python3', str(APP / 'bosun.py'), 'gui']),
+        str(homedir / 'Desktop/Bosun.desktop'): desktop_entry(['/usr/bin/python3', str(APP / 'bosun.py'), 'gui']),
     }
     content = {**unit_files(), **wrappers}
     for file, text in content.items():
@@ -140,6 +141,8 @@ def install(source, username, decky_enabled=True):
     with (BASE / 'state/lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         system.restore_readonly()
+        from bosun.dependencies import ensure_desktop
+        print('\n'.join(ensure_desktop(system)))
         if decky_enabled:
             from bosun.dependencies import ensure_decky
             homebrew, messages = ensure_decky(system, user)

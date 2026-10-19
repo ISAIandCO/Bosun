@@ -616,6 +616,7 @@ class InstallerTests(unittest.TestCase):
              patch.object(installer, 'unit_files', return_value=units), \
              patch.object(installer.pwd, 'getpwnam', return_value=user), \
              patch.object(installer.os, 'chown'), \
+             patch('bosun.dependencies.ensure_desktop', return_value=[]), \
              patch('bosun.core.System', return_value=self.s):
             with contextlib.redirect_stdout(io.StringIO()):
                 yield source, homedir, base, units
@@ -625,6 +626,11 @@ class InstallerTests(unittest.TestCase):
             installer.install(source, 'deck', decky_enabled=False)
             self.assertTrue((base / 'app/bosun.py').exists())
             self.assertTrue((home / 'Desktop/Bosun.desktop').exists())
+            launcher = (home / 'Desktop/Bosun.desktop').read_text()
+            self.assertIn('Terminal=false', launcher)
+            self.assertIn('\"gui\"', launcher)
+            for name in ['desktop.py', 'gui.py', 'presentation.py']:
+                self.assertTrue((base / 'app/bosun' / name).is_file())
             self.assertFalse((base / 'state/state.json').exists())
             (base / 'state/profiles').mkdir()
             (base / 'state/profiles/retained.json').write_text('{}')

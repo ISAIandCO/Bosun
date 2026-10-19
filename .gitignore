@@ -3,3 +3,4 @@ __pycache__/
 node_modules/
 decky/dist/*.map
 /release/
+/test-results/

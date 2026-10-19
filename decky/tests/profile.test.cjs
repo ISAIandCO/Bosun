@@ -16,8 +16,8 @@ async function fixture({ automatic = true, saveError = '', activationNotes = [],
     report: { profile: 'stock', desired: {}, managed: [], update_pending: false, session: null,
       system: { model: 'LCD', kernel: 'fixture', readonly: 'enabled', runtime: {}, cpu: {}, model_specs: { ram_mt_s: 5500, battery_design_wh: 40, panel_max_hz: 60 } } },
     config: { automatic, games: { '456': { name: 'Other', settings: { governor: 'powersave', epp: 'balance_power' }, resume: false } }, launch_options: {} },
-    profiles: { recommended: { nmi_watchdog: 0 }, 'cpu-game': { governor: 'powersave', epp: 'balance_performance' } },
-    catalog: { governor: ['powersave|performance', 'CPU'], epp: ['balance_power|performance', 'EPP'], compaction_proactiveness: ['0..100', 'VM'] },
+    profiles: { recommended: { nmi_watchdog: 0, mitigations: 'off', memlock_kb: 8192 }, 'boot-only': { mitigations: 'off' }, 'cpu-game': { governor: 'powersave', epp: 'balance_performance' } },
+    catalog: { governor: ['powersave|performance', 'CPU'], epp: ['balance_power|performance', 'EPP'], compaction_proactiveness: ['0..100', 'VM'], mitigations: ['off', 'boot'], memlock_kb: ['8192..2097152', 'login'] },
     runtime_keys: ['governor', 'epp', 'tdp_w', 'cpu_max_mhz', 'nmi_watchdog'], power_conflicts: [],
   };
   const rpc = async (method, ...args) => {
@@ -73,13 +73,15 @@ async function fixture({ automatic = true, saveError = '', activationNotes = [],
   await act(async () => { view = Renderer.create(host(true)); });
   const visible = async value => { await act(async () => { view.update(host(value)); }); };
   const field = (type, label) => view.root.findAllByType(type).find(n => n.props.label === label);
+  const section = title => view.root.findAllByType('PanelSection').find(n => n.props.title === title) || view.root.findAll(n => typeof n.type === 'function' && n.type.name === 'Disclosure' && n.props.title === title)[0];
+  const words = node => node.children.map(n => typeof n === 'string' ? n : words(n)).join(' ');
   const action = async text => {
     const node = view.root.findAllByType('ButtonItem').find(n => typeof n.props.children === 'string' && (typeof text === 'string' ? n.props.children === text : text.test(n.props.children)));
     assert.ok(node, 'Button not found: ' + text);
     await act(async () => { await node.props.onClick(); });
   };
   return { state, calls, notices, field, action, visible, buttons: () => view.root.findAllByType('ButtonItem'),
-    section: title => view.root.findAllByType('PanelSection').find(n => n.props.title === title), text: () => JSON.stringify(view.toJSON()),
+    section, sectionText: title => words(section(title)), text: () => JSON.stringify(view.toJSON()),
     dropdownModal: async (label, data) => {
       const onChange = field('DropdownItem', label).props.onChange;
       await visible(false);
@@ -255,7 +257,7 @@ for (const built of [false, true]) {
       await f.slider('Предел CPU, MHz', 2400);
       await f.action('Обновить фактическое состояние');
       const actual = f.section('Фактическое состояние устройства');
-      const text = JSON.stringify(actual.findAllByType('div').map(n => n.children));
+      const text = f.sectionText('Фактическое состояние устройства');
       assert.ok(text.includes('2800 MHz') && text.includes('3000 MHz'), 'readback must use reported values, not the 2400 MHz draft');
       assert.ok(text.includes('расхождение'));
       assert.ok(text.includes('9 W') && text.includes('совпадает'));
@@ -274,10 +276,47 @@ for (const built of [false, true]) {
       await f.slider('Предел CPU, MHz', 2400);
       await f.action('Проверить CPU: лимиты и частоты (2 с)');
       const actual = f.section('Фактическое состояние устройства');
-      const text = JSON.stringify(actual.findAllByType('div').map(n => n.children));
+      const text = f.sectionText('Фактическое состояние устройства');
       assert.ok(text.includes('CPU CHECK fixture') && text.includes('NOT confirmed'));
       assert.equal(f.field('SliderField', 'Предел CPU, MHz').props.value, 2400);
       assert.equal(f.calls.filter(c => c[0] === 'cpu_check').length, 1);
+      assert.equal(f.calls.filter(c => c[0] === 'save_game').length, 0);
+    } finally { await f.close(); }
+  });
+
+  test(`${target}: game presets and parameter choices exclude boot and login settings`, async () => {
+    const f = await fixture({ built });
+    try {
+      assert.ok(!f.field('DropdownItem', 'Загрузить основу в черновик').props.rgOptions.some(o => o.data === 'boot-only'));
+      assert.ok(!f.field('DropdownItem', 'Параметр').props.rgOptions.some(o => ['mitigations', 'memlock_kb'].includes(o.data)));
+      await f.dropdown('Загрузить основу в черновик', 'recommended');
+      await f.action('Предпросмотр без изменений');
+      const settings = f.calls.find(c => c[0] === 'preview')[1][0];
+      assert.deepEqual(settings, { nmi_watchdog: 0 });
+      await f.dropdown('Редактировать', 'global');
+      assert.ok(f.field('DropdownItem', 'Параметр').props.rgOptions.some(o => o.data === 'mitigations'));
+      assert.ok(f.field('DropdownItem', 'Загрузить основу в черновик').props.rgOptions.some(o => o.data === 'boot-only'));
+    } finally { await f.close(); }
+  });
+
+  test(`${target}: disclosures start closed and retain drafts and native field instances across collapse`, async () => {
+    const f = await fixture({ built });
+    const hidden = title => f.section(title).findAllByType('div').find(n => n.props['aria-hidden'] !== undefined).props['aria-hidden'];
+    try {
+      for (const title of ['Дополнительные параметры и эксперименты', 'Фактическое состояние устройства', 'Обслуживание и откат']) assert.equal(hidden(title), true);
+      await f.action('▸ CPU и GPU: политика');
+      const governor = f.field('DropdownItem', 'CPU governor');
+      await f.dropdown('CPU governor', 'performance');
+      await f.action('▾ CPU и GPU: политика');
+      await f.action('▸ CPU и GPU: политика');
+      assert.equal(f.field('DropdownItem', 'CPU governor'), governor);
+      assert.equal(governor.props.selectedOption, 'performance');
+      await f.action('▸ Параметры запуска Steam · со следующего запуска игры');
+      await f.action('Прочитать параметры из Steam');
+      await f.input('Текущая строка / редактирование', 'MANGOHUD=1 %command%');
+      await f.action('▾ Параметры запуска Steam · со следующего запуска игры');
+      await f.action('▸ Параметры запуска Steam · со следующего запуска игры');
+      assert.equal(f.field('TextField', 'Текущая строка / редактирование').props.value, 'MANGOHUD=1 %command%');
       assert.equal(f.calls.filter(c => c[0] === 'save_game').length, 0);
     } finally { await f.close(); }
   });

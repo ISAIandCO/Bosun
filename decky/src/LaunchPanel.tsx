@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { useEffect, useState } from 'react';
-import { ButtonItem, DropdownItem, PanelSection, PanelSectionRow, TextField } from '@decky/ui';
+import { ButtonItem, DropdownItem, PanelSectionRow, TextField } from '@decky/ui';
 import { callable } from '@decky/api';
 import { readLaunch, writeLaunch } from './launch';
 
@@ -61,8 +61,8 @@ export function LaunchPanel({ appid, backups, refresh }: { appid: string; backup
   const choose = (key: string, label: string, values: [string | number | boolean, string][]) => <PanelSectionRow><DropdownItem layout="below" label={label}
     selectedOption={options[key] ?? ''} disabled={busy} rgOptions={[{ data: '', label: 'Не задавать' }, ...values.map(([data, label]) => ({ data, label }))]}
     onChange={o => setOptions(old => { const result = { ...old }; if (o.data === '') delete result[key]; else result[key] = o.data; return result; })} /></PanelSectionRow>;
-  return <PanelSection title="Параметры запуска Steam — отдельно для игры">
-    <PanelSectionRow>Игра запускается обычным пользователем. Графика, разрешение и HDR автоматически не меняются.</PanelSectionRow>
+  return <>
+    <PanelSectionRow>Эти параметры действуют после перезапуска игры, без перезагрузки SteamOS. Графика, разрешение и HDR автоматически не меняются.</PanelSectionRow>
     <PanelSectionRow><ButtonItem layout="below" disabled={busy || !appid} onClick={() => run(async () => { const owner = account(); const value = await current(); if (account() !== owner) throw new Error('Steam-аккаунт изменился'); setText(value.text); setBaseline(value.text); setBaselineKey(owner + ':' + appid); setLoaded(true); setMessage('Прочитано из Steam'); })}>Прочитать параметры из Steam</ButtonItem></PanelSectionRow>
     {loaded && <>
       <PanelSectionRow><TextField label="Текущая строка / редактирование" value={text} onChange={e => setText(e.target.value)} /></PanelSectionRow>
@@ -83,5 +83,5 @@ export function LaunchPanel({ appid, backups, refresh }: { appid: string; backup
       <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => run(() => mutate('keep'))}>Оставить внешнюю строку и снять владение</ButtonItem></PanelSectionRow>
     </>}
     {message && <PanelSectionRow><div style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 13 }}>{message}</div></PanelSectionRow>}
-  </PanelSection>;
+  </>;
 }

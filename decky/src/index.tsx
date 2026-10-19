@@ -4,6 +4,7 @@ import { callable, definePlugin, toaster } from '@decky/api';
 import { useEffect, useRef, useState } from 'react';
 import { Game, watchGames } from './events';
 import { LaunchBackup, LaunchPanel, restoreLaunchBackups } from './LaunchPanel';
+import { Disclosure } from './Disclosure';
 
 type Settings = Record<string, string | number>;
 type Outcome = { notes: string[]; conflict?: boolean };
@@ -12,6 +13,7 @@ type State = {
   report: { profile: string; desired: Settings; update_pending: boolean; session: unknown; system: { model: string; kernel: string; readonly: string; model_specs: { ram_mt_s: number; battery_design_wh: number; panel_max_hz: number }; runtime: Record<string, string>; cpu: Record<string, Record<string, string>> }; managed: { change: { key: string; kind: string; path?: string }; last: string | null; actual: string | null; matches: boolean }[] };
   config: { automatic: boolean; games: Record<string, { name: string; settings: Settings; resume: boolean }>; launch_options?: Record<string, LaunchBackup> };
   profiles: Record<string, Settings>; catalog: Record<string, [string, string]>; runtime_keys: string[]; power_conflicts: string[];
+  game_profiles?: Record<string, Settings>; groups?: Record<string, string>; labels?: Record<string, string>;
 };
 const getState = callable<[], Reply<State>>('get_state');
 const saveGame = callable<[string, string, Settings, boolean], Reply<Outcome>>('save_game');
@@ -66,6 +68,7 @@ function Content() {
   const [message, setMessage] = useState('');
   const [cpuMessage, setCpuMessage] = useState('');
   const [key, setKey] = useState('compaction_proactiveness');
+  const [group, setGroup] = useState('Все');
   const [value, setValue] = useState('0');
   const refresh = async () => {
     const sequence = ++refreshSequence.current;
@@ -114,64 +117,76 @@ function Content() {
   if (!data) return <PanelSection><PanelSectionRow>{loadError || 'Загрузка Bosun…'}</PanelSectionRow><PanelSectionRow><ButtonItem layout="below" onClick={() => refresh().catch(notifyError)}>Повторить загрузку</ButtonItem></PanelSectionRow></PanelSection>;
   const system = data.report.system;
   const savedApps = [...new Set([...Object.keys(data.config.games), ...Object.values(data.config.launch_options || {}).map(saved => saved.appid)])];
-  const keys = Object.keys(data.catalog).filter(k => k !== 'lbpw' && (scope === 'global' || data.runtime_keys.includes(k)));
+  const allowed = Object.keys(data.catalog).filter(k => k !== 'lbpw' && (scope === 'global' || data.runtime_keys.includes(k)));
+  const keys = allowed.filter(k => group === 'Все' || (data.groups?.[k] || 'Дополнительно') === group);
+  const selectedKey = keys.includes(key) ? key : keys[0] || '';
+  const bases = scope === 'global' ? data.profiles : data.game_profiles || Object.fromEntries(Object.entries(data.profiles)
+    .map(([p, s]) => [p, Object.fromEntries(Object.entries(s).filter(([k]) => data.runtime_keys.includes(k)))])
+    .filter(([p, s]) => p === 'stock' || Object.keys(s).length));
   const add = () => {
-    if (!keys.includes(key)) { setMessage('Выберите допустимую настройку'); return; }
+    if (!keys.includes(selectedKey)) { setMessage('Выберите допустимую настройку'); return; }
     const parsed = /^-?\d+$/.test(value) ? Number(value) : value;
-    set(key, parsed); setMessage('Параметр добавлен в черновик. Проверьте предпросмотр.');
+    set(selectedKey, parsed); setMessage('Параметр добавлен в черновик. Проверьте предпросмотр.');
   };
   return <>
-    <PanelSection title={`Bosun 0.3.5 · ${system.model || 'неизвестная модель'}`}>
-      <PanelSectionRow><div style={{ fontSize: 13 }}>RAM {system.model_specs.ram_mt_s} MT/s · батарея {system.model_specs.battery_design_wh} Wh · панель до {system.model_specs.panel_max_hz} Hz<br />Ядро {system.kernel}<br />CPU driver: {[...new Set(Object.values(system.cpu).map(p => p.scaling_driver))].join(', ')}<br />Профиль: {data.report.profile} · RO: {system.readonly}<br />{game.id ? `Игра: ${game.name} (${game.id})` : 'Игра не запущена'}</div></PanelSectionRow>
-      {data.report.update_pending && <PanelSectionRow>SteamOS/стек обновился: проверьте глобальный профиль перед применением.</PanelSectionRow>}
-      {data.power_conflicts.length > 0 && <PanelSectionRow>Конкурирующий менеджер питания: {data.power_conflicts.join(', ')}. Power-настройки будут пропущены.</PanelSectionRow>}
-      <PanelSectionRow><ToggleField label="Автоматические профили игр" checked={data.config.automatic} disabled={busy} onChange={enabled => run(async () => {
-        const result = unpack(await automatic(enabled));
-        const applied = await syncGame(currentGame());
-        return { ok: true, data: { notes: [...result.notes, ...applied.notes], conflict: applied.conflict } };
-      })} /></PanelSectionRow>
-      <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => run(async () => ({ ok: true, data: await syncGame(currentGame()) }))}>Синхронизировать текущую игру</ButtonItem></PanelSectionRow>
-      <PanelSectionRow><DropdownItem layout="below" label="Редактировать" selectedOption={scope} disabled={busy} rgOptions={[{ data: 'game', label: 'Профиль игры' }, { data: 'global', label: 'Глобальные настройки' }]} onChange={o => setScope(String(o.data))} /></PanelSectionRow>
+    <PanelSection title={`Bosun 0.4.0 · ${system.model || 'Steam Deck'}`}>
+      <PanelSectionRow>{game.id ? `${game.name} (${game.id})` : 'Игра не запущена'}<br />Профиль устройства: {data.report.profile}</PanelSectionRow>
+      {data.report.update_pending && <PanelSectionRow>SteamOS обновилась: проверьте и явно примените глобальный профиль.</PanelSectionRow>}
+      {data.power_conflicts.length > 0 && <PanelSectionRow>Power-настройки пропускаются: {data.power_conflicts.join(', ')}.</PanelSectionRow>}
+      <PanelSectionRow><DropdownItem layout="below" label="Редактировать" selectedOption={scope} disabled={busy} rgOptions={[{ data: 'game', label: 'Игра · на лету' }, { data: 'global', label: 'Устройство · глобально' }]} onChange={o => { setScope(String(o.data)); setGroup('Все'); }} /></PanelSectionRow>
+      {scope === 'game' && <>
+        <PanelSectionRow>Выбрано: {name || 'Без названия'} {appid ? `(${appid})` : '· укажите AppID'}</PanelSectionRow>
+        <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => setAppid(game.id)}>Выбрать запущенную игру</ButtonItem></PanelSectionRow>
+        <Disclosure title="Выбрать другую игру" section={false}>
+          <PanelSectionRow><DropdownItem layout="below" label="Сохранённые игры и строки запуска" selectedOption={appid} disabled={busy} rgOptions={savedApps.map(id => ({ data: id, label: `${data.config.games[id]?.name || 'Steam'} (${id})` }))} onChange={o => setAppid(String(o.data))} /></PanelSectionRow>
+          <PanelSectionRow><TextField label="AppID (можно указать до запуска игры)" value={appid} disabled={busy} onChange={e => setAppid(e.target.value)} /></PanelSectionRow>
+          <PanelSectionRow><TextField label="Название" value={name} disabled={busy} onChange={e => { setName(e.target.value); setDirty(true); }} /></PanelSectionRow>
+          <PanelSectionRow><ToggleField label="Один раз восстановить после сна" checked={resume} disabled={busy} onChange={v => { setResume(v); setDirty(true); }} /></PanelSectionRow>
+          <PanelSectionRow><ButtonItem layout="below" disabled={busy || !appid} onClick={() => run(() => removeGame(appid), true)}>Удалить назначение</ButtonItem></PanelSectionRow>
+        </Disclosure>
+      </>}
     </PanelSection>
-    {scope === 'game' && <PanelSection title="Назначение игре">
-      <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => setAppid(game.id)}>Выбрать запущенную игру</ButtonItem></PanelSectionRow>
-      <PanelSectionRow><DropdownItem layout="below" label="Сохранённые игры и строки запуска" selectedOption={appid} disabled={busy} rgOptions={savedApps.map(id => ({ data: id, label: `${data.config.games[id]?.name || 'Steam'} (${id})` }))} onChange={o => setAppid(String(o.data))} /></PanelSectionRow>
-      <PanelSectionRow><TextField label="AppID (можно указать до запуска игры)" value={appid} disabled={busy} onChange={e => setAppid(e.target.value)} /></PanelSectionRow>
-      <PanelSectionRow><TextField label="Название" value={name} disabled={busy} onChange={e => { setName(e.target.value); setDirty(true); }} /></PanelSectionRow>
-      <PanelSectionRow><ToggleField label="Один раз восстановить после сна" description="Только известные сбросы; без постоянной перезаписи настроек Steam" checked={resume} disabled={busy} onChange={v => { setResume(v); setDirty(true); }} /></PanelSectionRow>
-    </PanelSection>}
-    {scope === 'game' && <LaunchPanel appid={appid} backups={data.config.launch_options || {}} refresh={refresh} />}
-    <PanelSection title="Настройки профиля">
-      <PanelSectionRow>{dirty ? 'Есть неприменённые изменения. Предпросмотр их сохраняет; затем нажмите кнопку сохранения/применения ниже.' : 'Показаны сохранённые настройки выбранного профиля.'}</PanelSectionRow>
-      {scope === 'game' && !data.config.automatic && <PanelSectionRow>Автоматические профили выключены: сохранение назначения не применит его к игре. Включите переключатель выше для применения при запуске.</PanelSectionRow>}
-      <PanelSectionRow><DropdownItem layout="below" label="Загрузить основу в черновик" selectedOption={base} disabled={busy} strDefaultLabel="Выбрать профиль" rgOptions={Object.keys(data.profiles).map(p => ({ data: p, label: p }))}
-        onChange={o => { const settings = data.profiles[String(o.data)]; setBase(String(o.data)); setDirty(true); setMessage(''); setDraft(Object.fromEntries(Object.entries(settings).filter(([k]) => scope === 'global' || data.runtime_keys.includes(k)))); }} /></PanelSectionRow>
-      {choose('governor', ['powersave', 'performance', 'schedutil'])}
-      {choose('epp', ['performance', 'balance_performance', 'balance_power', 'power'])}
-      <PanelSectionRow><DropdownItem layout="below" label="CPU Boost" selectedOption={draft.boost ?? ''} disabled={busy} rgOptions={[{ data: '', label: 'Наследовать' }, { data: 0, label: 'Выключить' }, { data: 1, label: 'Включить' }]} onChange={o => set('boost', o.data === '' ? undefined : Number(o.data))} /></PanelSectionRow>
+    <PanelSection title={scope === 'game' ? 'Настройки игры · без перезагрузки' : 'Общий профиль устройства'}>
+      <PanelSectionRow>{dirty ? 'Есть несохранённые изменения.' : 'Показаны сохранённые настройки.'}</PanelSectionRow>
+      {scope === 'game' && <PanelSectionRow>Здесь только параметры на лету. Загрузочные настройки — в режиме «Устройство».</PanelSectionRow>}
+      {scope === 'game' && !data.config.automatic && <PanelSectionRow>Автоматические профили выключены: назначение сохранится без применения. Включите их в разделе «Автоматика и устройство».</PanelSectionRow>}
+      <PanelSectionRow><DropdownItem layout="below" label="Загрузить основу в черновик" selectedOption={base} disabled={busy} strDefaultLabel="Выбрать профиль" rgOptions={Object.keys(bases).map(p => ({ data: p, label: p }))}
+        onChange={o => { const settings = bases[String(o.data)]; setBase(String(o.data)); setDirty(true); setMessage(''); setDraft({ ...settings }); }} /></PanelSectionRow>
       {slider('cpu_max_mhz', 400, 3500, 100, 2800)}
       {slider('tdp_w', 4, 15, 1, 10)}
-      {choose('gpu_mode', ['auto', 'low', 'high'])}
-      <PanelSectionRow>Задайте FPS cap и refresh штатными средствами Steam; графика и разрешение этим профилем не снижаются.</PanelSectionRow>
+      <Disclosure title="CPU и GPU: политика" section={false}>
+        {choose('governor', ['powersave', 'performance', 'schedutil'])}
+        {choose('epp', ['performance', 'balance_performance', 'balance_power', 'power'])}
+        <PanelSectionRow><DropdownItem layout="below" label="CPU Boost" selectedOption={draft.boost ?? ''} disabled={busy} rgOptions={[{ data: '', label: 'Наследовать' }, { data: 0, label: 'Выключить' }, { data: 1, label: 'Включить' }]} onChange={o => set('boost', o.data === '' ? undefined : Number(o.data))} /></PanelSectionRow>
+        {choose('gpu_mode', ['auto', 'low', 'high'])}
+      </Disclosure>
+      <PanelSectionRow>FPS cap и refresh задаются средствами Steam. Графика и разрешение не снижаются.</PanelSectionRow>
       <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => run(() => preview(draft, scope === 'game'))}>Предпросмотр без изменений</ButtonItem></PanelSectionRow>
-      {scope === 'game' ? <>
-        <PanelSectionRow><ButtonItem layout="below" disabled={busy || !appid} onClick={() => run(async () => {
-          const result = unpack(await saveGame(appid, name, draft, resume));
-          if (appid === currentGame().id && data.config.automatic) {
-            const applied = await syncGame(currentGame());
-            return { ok: true, data: { notes: [...result.notes, ...applied.notes], conflict: applied.conflict } };
-          }
-          return { ok: true, data: { notes: [...result.notes, data.config.automatic ? 'Назначение применится при запуске этой игры.' : 'SKIP: автоматические профили выключены; назначение сохранено без применения.'] } };
-        }, true)}>{appid === game.id && data.config.automatic ? 'Сохранить и применить к текущей игре' : 'Сохранить назначение игре'}</ButtonItem></PanelSectionRow>
-        <PanelSectionRow><ButtonItem layout="below" disabled={busy || !appid} onClick={() => run(() => removeGame(appid), true)}>Удалить назначение</ButtonItem></PanelSectionRow>
-      </> : <>
+      {scope === 'game' ? <PanelSectionRow><ButtonItem layout="below" disabled={busy || !appid} onClick={() => run(async () => {
+        const result = unpack(await saveGame(appid, name, draft, resume));
+        if (appid === currentGame().id && data.config.automatic) {
+          const applied = await syncGame(currentGame());
+          return { ok: true, data: { notes: [...result.notes, ...applied.notes], conflict: applied.conflict } };
+        }
+        return { ok: true, data: { notes: [...result.notes, data.config.automatic ? 'Назначение применится при запуске этой игры.' : 'SKIP: автоматические профили выключены; назначение сохранено без применения.'] } };
+      }, true)}>{appid === game.id && data.config.automatic ? 'Сохранить и применить к текущей игре' : 'Сохранить назначение игре'}</ButtonItem></PanelSectionRow> : <>
         <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => run(() => applyGlobal('decky-global', draft), true)}>Применить глобально</ButtonItem></PanelSectionRow>
         <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => run(() => applyGlobal('recommended', data.profiles.recommended), true)}>Применить рекомендуемый профиль</ButtonItem></PanelSectionRow>
       </>}
       {dirty && <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => { setBase(''); setDirty(false); }}>Сбросить черновик к сохранённому профилю</ButtonItem></PanelSectionRow>}
       {message && <PanelSectionRow><div style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 13 }}>{message}</div></PanelSectionRow>}
     </PanelSection>
-    <PanelSection title="Фактическое состояние устройства">
+    <Disclosure title="Дополнительные параметры и эксперименты">
+      <PanelSectionRow><DropdownItem layout="below" label="Группа параметров" selectedOption={group} disabled={busy} rgOptions={['Все', ...new Set(allowed.map(k => data.groups?.[k] || 'Дополнительно'))].map(g => ({ data: g, label: g }))} onChange={o => setGroup(String(o.data))} /></PanelSectionRow>
+      <PanelSectionRow><DropdownItem layout="below" label="Параметр" selectedOption={selectedKey} disabled={busy} rgOptions={keys.map(k => ({ data: k, label: data.labels?.[k] || labels[k] || k }))} onChange={o => setKey(String(o.data))} /></PanelSectionRow>
+      <PanelSectionRow><div style={{ fontSize: 12 }}>{data.catalog[selectedKey]?.[1]}</div></PanelSectionRow>
+      <PanelSectionRow><TextField label={`Значение: ${data.catalog[selectedKey]?.[0] || ''}`} value={value} disabled={busy} onChange={e => setValue(e.target.value)} /></PanelSectionRow>
+      <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={add}>Добавить / заменить в черновике</ButtonItem></PanelSectionRow>
+      <PanelSectionRow>В черновике: {Object.keys(draft).length}. Удаление ниже возвращает наследование при следующем применении.</PanelSectionRow>
+      {Object.entries(draft).map(([k, v]) => <PanelSectionRow key={k}><ButtonItem layout="below" disabled={busy} onClick={() => set(k, undefined)}>{data.labels?.[k] || labels[k] || k}: {v} · убрать</ButtonItem></PanelSectionRow>)}
+    </Disclosure>
+    {scope === 'game' && <Disclosure title="Параметры запуска Steam · со следующего запуска игры"><LaunchPanel appid={appid} backups={data.config.launch_options || {}} refresh={refresh} /></Disclosure>}
+    <Disclosure title="Фактическое состояние устройства">
       <PanelSectionRow>Последнее чтение из системы; выбранные значения в черновике сами по себе не подтверждают применение.</PanelSectionRow>
       {Object.entries(system.cpu).map(([p, cpu]) => <PanelSectionRow key={p}><div style={{ fontSize: 13, overflowWrap: 'anywhere' }}>
         {p.split('/').pop()} · {cpu.scaling_driver} · {cpu.scaling_governor}<br />
@@ -190,19 +205,20 @@ function Content() {
         {!m.matches && m.change.kind === 'scalar' && <ButtonItem layout="below" disabled={busy} onClick={() => run(() => release(m.change.key))}>Оставить фактическое значение</ButtonItem>}
       </PanelSectionRow>)}
       <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => refresh().catch(notifyError)}>Обновить фактическое состояние</ButtonItem></PanelSectionRow>
-    </PanelSection>
-    <PanelSection title="Отдельные и экспериментальные параметры">
-      <PanelSectionRow><DropdownItem layout="below" label="Параметр" selectedOption={key} disabled={busy} rgOptions={keys.map(k => ({ data: k, label: labels[k] || k }))} onChange={o => setKey(String(o.data))} /></PanelSectionRow>
-      <PanelSectionRow><div style={{ fontSize: 12 }}>{data.catalog[key]?.[1]}</div></PanelSectionRow>
-      <PanelSectionRow><TextField label={`Значение: ${data.catalog[key]?.[0] || ''}`} value={value} disabled={busy} onChange={e => setValue(e.target.value)} /></PanelSectionRow>
-      <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={add}>Добавить / заменить в черновике</ButtonItem></PanelSectionRow>
-      {Object.entries(draft).map(([k, v]) => <PanelSectionRow key={k}><ButtonItem layout="below" disabled={busy} onClick={() => set(k, undefined)}>{labels[k] || k}: {v} · убрать</ButtonItem></PanelSectionRow>)}
-    </PanelSection>
-    <PanelSection title="Состояние и обслуживание">
+    </Disclosure>
+    <Disclosure title="Автоматика и устройство">
+      <PanelSectionRow><ToggleField label="Автоматические профили игр" checked={data.config.automatic} disabled={busy} onChange={enabled => run(async () => {
+        const result = unpack(await automatic(enabled)); const applied = await syncGame(currentGame());
+        return { ok: true, data: { notes: [...result.notes, ...applied.notes], conflict: applied.conflict } };
+      })} /></PanelSectionRow>
+      <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => run(async () => ({ ok: true, data: await syncGame(currentGame()) }))}>Синхронизировать текущую игру</ButtonItem></PanelSectionRow>
+      <PanelSectionRow>Ядро: {system.kernel}<br />CPU driver: {[...new Set(Object.values(system.cpu).map(p => p.scaling_driver))].join(', ')}<br />RAM {system.model_specs.ram_mt_s} MT/s · батарея {system.model_specs.battery_design_wh} Wh · панель до {system.model_specs.panel_max_hz} Hz · RO {system.readonly}</PanelSectionRow>
+    </Disclosure>
+    <Disclosure title="Обслуживание и откат">
       <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => run(measurementTools)}>Подготовить MangoHud для A/B-замеров</ButtonItem></PanelSectionRow>
-      <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => run(async () => { await restoreLaunchBackups(data.config.launch_options || {}); return rollback(); }, true)}>Полный откат, включая параметры запуска Steam</ButtonItem></PanelSectionRow>
       <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => run(() => update())}>Обновить Bosun и плагин</ButtonItem></PanelSectionRow>
-    </PanelSection>
+      <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => run(async () => { await restoreLaunchBackups(data.config.launch_options || {}); return rollback(); }, true)}>Полный откат, включая параметры запуска Steam</ButtonItem></PanelSectionRow>
+    </Disclosure>
   </>;
 }
 
