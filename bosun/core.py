@@ -15,7 +15,7 @@ import tempfile
 import time
 from . import tweaks
 
-VERSION = '0.3.1'
+VERSION = '0.3.2'
 APP = '/home/.bosun/app'
 STATE = '/home/.bosun/state'
 BOOT = '/etc/default/grub.d/zz-bosun.cfg'
@@ -272,7 +272,8 @@ class System:
             self.command('grub-mkconfig', '-o', str(new), timeout=120)
             self.command('grub-script-check', str(new))
             text = new.read_text()
-            linux = [line for line in text.splitlines() if re.match(r'\s*linux(?:efi)?\s', line)]
+            # SteamOS prefixes the kernel loader with its steamenv_boot command.
+            linux = [line for line in text.splitlines() if re.match(r'\s*(?:steamenv_boot\s+)?linux(?:efi)?\s', line)]
             if not linux:
                 raise BosunError('Generated GRUB has no Linux entries')
             for arg in expected:

@@ -20,7 +20,7 @@ APP = Path('/home/.bosun/app')
 BASE = APP.parent
 FILES = ['bosun.py', 'bosun/__init__.py', 'bosun/core.py', 'bosun/measure.py', 'bosun/sessions.py', 'bosun/control.py', 'bosun/dependencies.py', 'bosun/tweaks.py', 'bosun/launch.py',
          'install.py', 'README.md', 'LICENSE', 'docs/tweaks.md', 'docs/testing.md', 'docs/benchmark-metadata.json', 'docs/hardware-and-tweaks.md',
-         'docs/global-analysis.md', 'docs/catalog.md', 'docs/releases/0.3.1.md',
+         'docs/global-analysis.md', 'docs/catalog.md', 'docs/releases/0.3.2.md',
          'decky/main.py', 'decky/plugin.json', 'decky/package.json', 'decky/dist/index.js',
          'decky/NOTICE', 'decky/LICENSES/Decky-LGPL-2.1.txt',
          'decky/third-party/loader-api/src/index.ts', 'decky/third-party/loader-api/src/types.ts',

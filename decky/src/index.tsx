@@ -97,7 +97,7 @@ function Content() {
     set(key, parsed); setMessage('Параметр добавлен в черновик. Проверьте предпросмотр.');
   };
   return <>
-    <PanelSection title={`Bosun 0.3.1 · ${system.model || 'неизвестная модель'}`}>
+    <PanelSection title={`Bosun 0.3.2 · ${system.model || 'неизвестная модель'}`}>
       <PanelSectionRow><div style={{ fontSize: 13 }}>RAM {system.model_specs.ram_mt_s} MT/s · батарея {system.model_specs.battery_design_wh} Wh · панель до {system.model_specs.panel_max_hz} Hz<br />Ядро {system.kernel}<br />CPU driver: {[...new Set(Object.values(system.cpu).map(p => p.scaling_driver))].join(', ')}<br />Профиль: {data.report.profile} · RO: {system.readonly}<br />{game.id ? `Игра: ${game.name} (${game.id})` : 'Игра не запущена'}</div></PanelSectionRow>
       {data.report.update_pending && <PanelSectionRow>SteamOS/стек обновился: проверьте глобальный профиль перед применением.</PanelSectionRow>}
       {data.power_conflicts.length > 0 && <PanelSectionRow>Конкурирующий менеджер питания: {data.power_conflicts.join(', ')}. Power-настройки будут пропущены.</PanelSectionRow>}

@@ -513,6 +513,89 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(self.s.read(base + 'energy_performance_preference'), 'performance')
 
 
+class BootValidationTests(unittest.TestCase):
+    setUp = CoreTests.setUp
+    tearDown = CoreTests.tearDown
+    put = CoreTests.put
+    apply = CoreTests.apply
+    target = '/efi/EFI/steamos/grub.cfg'
+
+    def config(self, command='steamenv_boot\tlinux', args='mitigations=off'):
+        # Loader form observed in SteamOS: randombk/steamos-teardown, docs/boot.md.
+        return ("menuentry 'SteamOS' {\n\tinsmod steamenv\n"
+                f'\t{command} /boot/vmlinuz-linux-neptune quiet {args}\n'
+                '\tinitrd /boot/amd-ucode.img /boot/initramfs-linux-neptune.img\n}\n')
+
+    @contextlib.contextmanager
+    def generator(self, content, syntax_error=False, external_edit=False):
+        original_command = self.s.command
+        def command(*args, **kwargs):
+            if args[0] in {'grub-mkconfig', 'grub-script-check'}:
+                self.s.commands.append(list(args))
+                if args[0] == 'grub-mkconfig':
+                    Path(args[2]).write_text(content() if callable(content) else content)
+                elif syntax_error:
+                    raise BosunError('grub-script-check: simulated syntax error')
+                elif external_edit:
+                    self.put(self.target, 'external EFI edit')
+                return ''
+            return original_command(*args, **kwargs)
+        which = lambda name: '/usr/bin/' + name if self.s.path('/usr/bin/' + name).exists() else None
+        # Execute the production validation/backup/replace path; only external tools are mocked.
+        with patch.object(self.s, 'fake', False), patch.object(self.s, 'which', which), patch.object(self.s, 'command', command):
+            yield
+
+    def test_steamos_boot_apply_repeat_and_rollback_validate_real_generation_path(self):
+        content = lambda: self.config(args='mitigations=off' if self.s.path(BOOT).exists() else '')
+        with self.generator(content):
+            self.assertFalse(self.apply({'mitigations': 'off'})[1])
+            self.assertEqual(self.s.read(self.target), self.config().strip())
+            self.assertEqual(self.s.read(STATE + '/grub-before.cfg'), 'original config')
+            self.apply({'mitigations': 'off'})
+            self.assertEqual(sum(c[0] == 'grub-mkconfig' for c in self.s.commands), 1)
+            self.engine.apply('stock', {})
+            self.assertIsNone(self.s.read(BOOT))
+            self.assertNotIn('mitigations=off', self.s.read(self.target))
+            self.assertEqual(self.s.readonly, 'enabled')
+
+    def test_direct_and_efi_kernel_loaders_remain_supported(self):
+        for loader in ['linux', 'linuxefi', 'steamenv_boot linuxefi']:
+            with self.subTest(loader=loader), self.generator(self.config(command=loader)):
+                self.s.regenerate_boot(['mitigations=off'])
+                self.assertIn(loader, self.s.read(self.target))
+
+    def test_comments_echo_and_other_efi_commands_do_not_count_as_linux(self):
+        for text in ['# steamenv_boot linux /boot/vmlinuz mitigations=off\n',
+                     'echo "steamenv_boot linux /boot/vmlinuz mitigations=off"\n',
+                     'steamenv_boot chainloader /EFI/other.efi\n']:
+            with self.subTest(text=text), self.generator(text), self.assertRaisesRegex(BosunError, 'no Linux entries'):
+                self.s.regenerate_boot(['mitigations=off'])
+            self.assertEqual(self.s.read(self.target), 'original config')
+
+    def test_boot_parameter_must_be_on_a_kernel_loader_line(self):
+        text = '# mitigations=off\n' + self.config(args='')
+        with self.generator(text), self.assertRaisesRegex(BosunError, 'missing mitigations=off'):
+            self.s.regenerate_boot(['mitigations=off'])
+        self.assertEqual(self.s.read(self.target), 'original config')
+
+    def test_syntax_check_failure_restores_override_runtime_and_readonly(self):
+        with self.generator(self.config(), syntax_error=True), self.assertRaisesRegex(BosunError, 'syntax error'):
+            self.apply({'nmi_watchdog': 0, 'mitigations': 'off'})
+        self.assertEqual(self.s.read(self.target), 'original config')
+        self.assertEqual(self.s.read('/proc/sys/kernel/nmi_watchdog'), '1')
+        self.assertIsNone(self.s.read(BOOT))
+        self.assertFalse(self.engine.state['entries'])
+        self.assertEqual(self.s.readonly, 'enabled')
+
+    def test_concurrent_efi_edit_is_retained_and_transaction_recovers(self):
+        with self.generator(self.config(), external_edit=True), self.assertRaisesRegex(BosunError, 'changed during generation'):
+            self.apply({'nmi_watchdog': 0, 'mitigations': 'off'})
+        self.assertEqual(self.s.read(self.target), 'external EFI edit')
+        self.assertEqual(self.s.read('/proc/sys/kernel/nmi_watchdog'), '1')
+        self.assertIsNone(self.s.read(BOOT))
+        self.assertFalse(self.engine.state['entries'])
+
+
 @unittest.skipUnless(os.geteuid() == 0, 'Installer fixture needs chown, never writes outside test root')
 class InstallerTests(unittest.TestCase):
     setUp = CoreTests.setUp

@@ -2,7 +2,7 @@
 
 ## Фактически проверено
 
-В версии 0.3.1: 107 Python-тестов и 11 frontend-тестов проходят локально; TypeScript проверен, Decky bundle собирается. Физический Steam Deck в среде разработки отсутствует. Ни прирост FPS, ни снижение мощности, ни аппаратная совместимость LCD/OLED не измерены. DMI-модели и sysfs-интерфейсы проверены на изолированных fixtures. Это проверка логики программы, а не эмуляция драйверов GPU/SMU или доказательство загрузки реальной SteamOS.
+В версии 0.3.2: 113 Python-тестов и 11 frontend-тестов проходят локально; TypeScript проверен, Decky bundle собирается. Физический Steam Deck в среде разработки отсутствует. Ни прирост FPS, ни снижение мощности, ни аппаратная совместимость LCD/OLED не измерены. DMI-модели и sysfs-интерфейсы проверены на изолированных fixtures. Это проверка логики программы, а не эмуляция драйверов GPU/SMU или доказательство загрузки реальной SteamOS.
 
 ```bash
 python3 -m unittest discover -s tests -v
@@ -16,6 +16,8 @@ node --test decky/tests/*.test.cjs
 Проверки охватывают preview без записи, реальные записи в изолированное дерево `/proc`/`sys`/`etc`/EFI, идемпотентность, точный откат исходных значений, отсутствие/неподдерживаемые параметры, LCD/OLED/неизвестную модель, swappiness с zram/disk swap, CPU/EPP/cap, TDP hardware bounds, GPU/SD policy, scheduler lifecycle, частичный сбой, journal recovery и его конфликт, загрузочный override, ошибку генератора, сохранение режима read-only, reboot/update baseline, resume без гонки со Steam, установку/обновление/удаление и game-session helper.
 
 Регрессия прав Decky проверяется по установленным `plugin.json` и backend: root-процесс реально открывает журнал `0700`, сохраняет профиль и делает apply/rollback. При наличии UID/GID 1000 в namespace тест также запускает backend от обычного пользователя, воспроизводит отказ Unix permissions и проверяет понятную ошибку. В локальном контейнере отображён только UID 0; обе идентичности проверяются в Ubuntu CI.
+
+В шести GRUB-регрессиях выполняется production-путь валидации/backup/записи; эмулируются только внешние grub-mkconfig/grub-script-check. Покрыты SteamOS steamenv_boot linux, linux/linuxefi, параметры cmdline, ошибка syntax checker и внешнее изменение EFI перед записью.
 
 Boot generator/SMU/BPF в fixtures не исполняются. Shell-фрагмент GRUB исполняется в отдельном bash с тестовой cmdline; systemd unit-файлы проверяются отдельно. CI запускает те же тесты на Linux.
 
