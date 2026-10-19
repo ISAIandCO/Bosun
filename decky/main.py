@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 import asyncio
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -8,6 +9,11 @@ import sys
 sys.path.insert(0, '/home/.bosun/app')
 from bosun.control import Control
 from bosun.core import APP, System
+
+
+def require_root():
+    if os.geteuid() != 0:
+        raise PermissionError('Bosun: Decky не предоставил права root. Запустите актуальный Bosun-installer.desktop в Desktop Mode; установщик исправит флаг плагина и перезапустит Decky. Права журнала менять не нужно.')
 
 
 class Plugin:
@@ -18,6 +24,7 @@ class Plugin:
     async def _call(self, method, *args):
         async with self.gate:
             try:
+                require_root()
                 data = await asyncio.to_thread(getattr(self.control, method), *args)
                 return {'ok': True, 'data': data}
             except Exception as exc:
@@ -65,6 +72,7 @@ class Plugin:
     async def update(self):
         # Separate systemd job survives Decky restarting after plugin files are replaced.
         try:
+            require_root()
             user = json.loads(Path('/home/.bosun/install.json').read_text())['user']
             result = await asyncio.to_thread(subprocess.run,
                 ['systemd-run', '--collect', '--unit=bosun-update', '/usr/bin/python3', APP + '/install.py', '--update', '--user', user],

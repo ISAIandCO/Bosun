@@ -3,6 +3,8 @@ import errno
 import hashlib
 import json
 from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -312,6 +314,78 @@ class DeckyInstallerTests(unittest.TestCase):
     put = fixtures.CoreTests.put
     cpu = fixtures.CoreTests.cpu
     environment = fixtures.InstallerTests.environment
+
+    def test_installed_plugin_privileges_match_decky_and_can_manage_protected_state(self):
+        # Decky sandboxed_plugin.py chooses EFFECTIVE_USER only for the literal "root" flag.
+        # Exercise the installed backend in a real child process, not with mocked filesystem permissions.
+        probe = r'''
+import asyncio, importlib.util, json, os, pathlib, sys
+plugin_dir, root, app = map(pathlib.Path, sys.argv[1:])
+flags = json.loads((plugin_dir / 'plugin.json').read_text())['flags']
+if 'root' not in flags:
+    # Some local containers map only UID/GID 0. Ubuntu CI can exercise both identities.
+    maps = [pathlib.Path('/proc/self/' + name).read_text().splitlines() for name in ['uid_map', 'gid_map']]
+    if not all(any(int(row.split()[0]) <= 1000 < int(row.split()[0]) + int(row.split()[2]) for row in rows) for rows in maps):
+        print(json.dumps({'unmapped_uid': True}))
+        sys.exit(0)
+    os.setgid(1000)
+    os.setuid(1000)
+sys.path.insert(0, str(app))
+spec = importlib.util.spec_from_file_location('bosun_decky_probe', plugin_dir / 'main.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+from bosun.core import System, STATE
+from bosun.control import Control
+async def main():
+    plugin = module.Plugin()
+    await plugin._main()
+    plugin.control = Control(System(str(root)))
+    saved = await plugin.save_game('123', 'Permission regression', {'nmi_watchdog': 0})
+    if os.geteuid() != 0:
+        denied = False
+        try:
+            (root / STATE.lstrip('/') / 'lock').open('a').close()
+        except PermissionError:
+            denied = True
+        updated = await plugin.update()
+        print(json.dumps({'uid': os.geteuid(), 'saved': saved, 'updated': updated, 'lock_denied': denied}))
+        return
+    assert saved['ok'], saved
+    result = await plugin.apply_global('permission-probe', {'nmi_watchdog': 0})
+    assert result['ok'], result
+    assert (root / 'proc/sys/kernel/nmi_watchdog').read_text().strip() == '0'
+    result = await plugin.rollback()
+    assert result['ok'], result
+    assert (root / 'proc/sys/kernel/nmi_watchdog').read_text().strip() == '1'
+    lock = root / STATE.lstrip('/') / 'lock'
+    print(json.dumps({'uid': os.geteuid(), 'lock_uid': lock.stat().st_uid, 'saved': saved}))
+asyncio.run(main())
+'''
+        with self.environment() as (source, home, base, units):
+            self.root.chmod(0o755)
+            with patch('bosun.dependencies.ensure_decky', return_value=(home / 'homebrew', [])):
+                installer.install(source, 'deck')
+            plugin = home / 'homebrew/plugins/Bosun'
+            args = [sys.executable, '-c', probe, str(plugin), str(self.root), str(base / 'app')]
+            result = subprocess.run(args, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            good = json.loads(result.stdout)
+            self.assertEqual((good['uid'], good['lock_uid']), (0, 0))
+            self.assertTrue(good['saved']['ok'])
+            self.assertEqual((base / 'state').stat().st_mode & 0o777, 0o700)
+            manifest = json.loads((plugin / 'plugin.json').read_text())
+            manifest['flags'] = ['_root']
+            (plugin / 'plugin.json').write_text(json.dumps(manifest))
+            result = subprocess.run(args, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            bad = json.loads(result.stdout)
+            if bad.get('unmapped_uid'):
+                return
+            self.assertEqual(bad['uid'], 1000)
+            self.assertTrue(bad['lock_denied'])
+            for reply in [bad['saved'], bad['updated']]:
+                self.assertFalse(reply['ok'])
+                self.assertIn('не предоставил права root', reply['error'])
 
     def test_old_installer_stage_fetches_new_file_list_from_same_commit(self):
         stage = self.root / 'old-download'
