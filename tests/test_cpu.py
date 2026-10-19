@@ -37,7 +37,7 @@ class CpuTests(unittest.TestCase):
                 notes, conflict = self.engine.apply('cap', {'cpu_max_mhz': cap})
                 self.assertFalse(conflict, notes)
                 self.assertEqual(self.s.read(base + 'scaling_max_freq'), str(cap * 1000))
-                self.assertEqual(self.s.read(base + 'scaling_min_freq'), str(cap * 1000))
+                self.assertEqual(self.s.read(base + 'scaling_min_freq'), '400000')
             self.engine.apply('stock', {})
         self.assertEqual(self.s.read(base + 'scaling_min_freq'), '3500000')
         self.assertEqual(self.s.read(base + 'scaling_max_freq'), '3500000')
@@ -66,9 +66,9 @@ class CpuTests(unittest.TestCase):
         self.put(base + 'scaling_max_freq', '3500000')
         with self.strict_ranges():
             self.engine.apply('cap', {'cpu_max_mhz': 3000})
-            self.assertEqual(self.s.read(base + 'scaling_min_freq'), '2800000')
+            self.assertEqual(self.s.read(base + 'scaling_min_freq'), '400000')
             self.engine.apply('stock', {})
-        self.assertEqual(self.s.read(base + 'scaling_min_freq'), '2800000')
+        self.assertEqual(self.s.read(base + 'scaling_min_freq'), '400000')
         self.assertEqual(self.s.read(base + 'scaling_max_freq'), '3500000')
 
     def test_all_policies_apply_and_restore_on_lcd_and_oled(self):
@@ -85,6 +85,7 @@ class CpuTests(unittest.TestCase):
                     self.engine.apply('cap', {'cpu_max_mhz': 2400})
                     for i in range(8):
                         self.assertEqual(self.s.read(base.replace('policy0', 'policy' + str(i)) + 'scaling_max_freq'), '2400000')
+                        self.assertEqual(self.s.read(base.replace('policy0', 'policy' + str(i)) + 'scaling_min_freq'), '400000')
                     self.engine.apply('stock', {})
                 for i in range(8):
                     self.assertEqual(self.s.read(base.replace('policy0', 'policy' + str(i)) + 'scaling_min_freq'), '3500000')
@@ -109,13 +110,13 @@ class CpuTests(unittest.TestCase):
         writes = []
         for field in ['scaling_max_freq', 'scaling_min_freq']:
             change = Change('cpu_max_mhz', base + field, '3000000')
-            writes.append({'change': dataclasses.asdict(change), 'before': '2800000'})
+            writes.append({'change': dataclasses.asdict(change), 'before': self.s.read(base + field)})
             self.put(base + field, '3000000')
         self.engine.state['pending'] = {'state_before': before, 'writes': writes}
         self.engine.save()
         with self.strict_ranges():
             self.engine.recover()
-        self.assertEqual(self.s.read(base + 'scaling_min_freq'), '2800000')
+        self.assertEqual(self.s.read(base + 'scaling_min_freq'), '400000')
         self.assertEqual(self.s.read(base + 'scaling_max_freq'), '2800000')
 
     def test_cap_below_hardware_minimum_is_skipped_before_a_driver_write(self):

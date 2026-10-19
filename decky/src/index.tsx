@@ -130,7 +130,7 @@ function Content() {
     set(selectedKey, parsed); setMessage('Параметр добавлен в черновик. Проверьте предпросмотр.');
   };
   return <>
-    <PanelSection title={`Bosun 0.4.4 · ${system.model || 'Steam Deck'}`}>
+    <PanelSection title={`Bosun 0.4.5 · ${system.model || 'Steam Deck'}`}>
       <PanelSectionRow>{game.id ? `${game.name} (${game.id})` : 'Игра не запущена'}<br />Профиль устройства: {data.report.profile}</PanelSectionRow>
       {data.report.update_pending && <PanelSectionRow>SteamOS обновилась: глобальный профиль требует проверки. Профили игр проверяются при запуске автоматически.</PanelSectionRow>}
       {!!data.report.cpu_recovery?.length && <>
@@ -158,6 +158,7 @@ function Content() {
       <PanelSectionRow><DropdownItem layout="below" label="Загрузить основу в черновик" selectedOption={base} disabled={busy} strDefaultLabel="Выбрать профиль" rgOptions={Object.keys(bases).map(p => ({ data: p, label: p }))}
         onChange={o => { const settings = bases[String(o.data)]; setBase(String(o.data)); setDirty(true); setMessage(''); setDraft({ ...settings }); }} /></PanelSectionRow>
       {slider('cpu_max_mhz', 400, 3500, 100, 2800)}
+      <PanelSectionRow>Предел CPU — верхняя граница, не фиксированная частота. Частоту внутри диапазона выбирает governor; performance запрашивает верхнюю.</PanelSectionRow>
       {slider('tdp_w', 4, 15, 1, 10)}
       <Disclosure title="CPU и GPU: политика" section={false}>
         {choose('governor', ['powersave', 'performance', 'schedutil'])}

@@ -196,6 +196,16 @@ class Control:
                          f"EPP={self.system.read(p + '/energy_performance_preference', '?')}; "
                          f"boost={self.system.read(p + '/boost', self.system.read('/sys/devices/system/cpu/cpufreq/boost', '?'))}")
             notes.append(f"min/max={floor}/{ceiling} kHz; peak={reading['peak']} kHz ({source})")
+            if floor.isdigit() and ceiling.isdigit() and floor == ceiling:
+                notes.append('WARNING: min=max; the policy allows only one frequency, not a dynamic range')
+            governor = self.system.read(p + '/scaling_governor', '')
+            if governor == 'performance':
+                notes.append('NOTE: performance requests the upper end; a ceiling alone does not enable load-based scaling')
+            choices = self.system.read(p + '/scaling_available_governors', '').split()
+            dynamic = ('powersave + EPP' if driver in {'amd-pstate-epp', 'amd_pstate_epp'} and 'powersave' in choices else
+                       next((g for g in ['schedutil', 'ondemand'] if g in choices), None))
+            if dynamic:
+                notes.append('Load-based scaling available: ' + dynamic + '; governor is not changed by the CPU ceiling')
             notes.append(f"available_kHz={self.system.read(p + '/scaling_available_frequencies', 'continuous/not exported')}; "
                          f"related_cpus={self.system.read(p + '/related_cpus', '?')}")
             if len(reading['limits']) > 1:

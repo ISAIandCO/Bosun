@@ -15,7 +15,7 @@ import tempfile
 import time
 from . import tweaks
 
-VERSION = '0.4.4'
+VERSION = '0.4.5'
 APP = '/home/.bosun/app'
 STATE = '/home/.bosun/state'
 BOOT = '/etc/default/grub.d/zz-bosun.cfg'
@@ -54,7 +54,7 @@ CATALOG = {
     'epp': ('available EPP name', 'Per-game CPPC energy hint; may reduce CPU-bound FPS/lows.'),
     'boost': ('0|1', 'Per-game CPU boost; disabling can free APU budget, can hurt CPU-bound games.'),
     'smt': ('on|off', 'Experimental CPU topology; can hurt threaded games. Never forceoff.'),
-    'cpu_max_mhz': ('400..3500', 'CPUFreq policy ceiling; hardware bounds checked, min lowered only if required. Verify actual clocks under load; not a guaranteed SMU/Boost hard cap.'),
+    'cpu_max_mhz': ('400..3500', 'CPUFreq upper bound, not a fixed clock; a floor at/above the ceiling is lowered to the hardware minimum. Governor unchanged; performance can still request the ceiling. Verify actual clocks under load.'),
     'tdp_w': ('4..15', 'Per-game APU cap in watts, NOT total battery power.'),
     'gpu_mode': ('auto|low|high', 'AMDGPU dynamic clock policy; low/high may badly redistribute budget.'),
     'nvme_scheduler': ('available scheduler', 'Experimental storage latency/throughput tradeoff.'),
@@ -531,9 +531,17 @@ def plan(system, settings, managed=()):
                     if hardware_min <= hz <= maximum:
                         old = managed.get('scalar:' + p + '/scaling_min_freq') if isinstance(managed, dict) else None
                         floor = int(old['original']) if old else minimum
-                        if minimum > hz or old:
-                            add(key, p + '/scaling_min_freq', min(floor, hz))
+                        # A ceiling must not turn a high inherited floor into min=max.
+                        # Retain a lower baseline floor; open the hardware range otherwise.
+                        floor = hardware_min if floor >= hz else floor
+                        if minimum != floor or old:
+                            add(key, p + '/scaling_min_freq', floor)
                         add(key, p + '/scaling_max_freq', hz)
+                        governor = settings.get('governor', system.read(p + '/scaling_governor'))
+                        if governor in {'performance', 'powersave', 'userspace'}:
+                            driver = system.read(p + '/scaling_driver', '')
+                            if governor != 'powersave' or driver not in {'amd-pstate-epp', 'amd_pstate_epp'}:
+                                skipped.append(f'NOTE {key}: {p} ceiling only; governor={governor} retained, so a dynamic operating clock is not guaranteed')
                     else:
                         skipped.append(f'{key}: {p} requested ceiling outside hardware range [{hardware_min}, {maximum}] kHz')
                 else:
@@ -631,7 +639,7 @@ def plan(system, settings, managed=()):
                 value = 'performance' if settings['governor'] == 'performance' else baseline
                 changes.append(Change('epp', p + '/energy_performance_preference', value))
     changes.sort(key=lambda c: (c.key != 'governor', c.kind == 'service'))
-    return changes, [note if note.startswith(('SKIP ', 'RESOLVE ')) else 'SKIP ' + note for note in skipped]
+    return changes, [note if note.startswith(('SKIP ', 'RESOLVE ', 'NOTE ')) else 'SKIP ' + note for note in skipped]
 
 
 def cpu_frequency_bound(change):

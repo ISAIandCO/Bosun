@@ -125,6 +125,8 @@ class ProfileEditor(QWidget):
                 widget.setAccessibleName(caption + ': значение'); widget.setEnabled(False)
                 enabled.toggled.connect(widget.setEnabled); enabled.toggled.connect(self.edited)
                 stack.addWidget(widget); layout.addWidget(row)
+                if key == 'cpu_max_mhz':
+                    stack.addWidget(label('Верхняя граница, не фиксированная частота. Частоту внутри диапазона выбирает governor; performance запрашивает верхнюю.'))
                 self.rows[key] = (row, enabled, widget)
             layout.addStretch()
 
