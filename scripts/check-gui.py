@@ -105,6 +105,17 @@ def check(screenshots):
         assert Engine(fixture.s).state['profile'] == 'recommended'
         control.rollback(); window.loaded(control.state())
 
+        from bosun.sessions import session_action
+        engine = Engine(fixture.s)
+        session_action(engine, 'session-start', 'old-launcher', 'a' * 32, {'cpu_max_mhz': 2400})
+        window.loaded(control.state()); app.processEvents()
+        assert 'old-launcher' in window.summary.text()
+        click('Применить')
+        session_action(Engine(fixture.s), 'session-end', 'old-launcher', 'a' * 32)
+        assert Engine(fixture.s).state['profile'] == 'recommended'
+        assert 'session' not in Engine(fixture.s).state
+        control.rollback(); window.loaded(control.state())
+
         # Real asynchronous request path, including cancellation. Window stays responsive;
         # denied authorization must retain the editor draft and show an error.
         window.request = Window.request.__get__(window)

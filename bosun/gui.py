@@ -438,8 +438,9 @@ class Window(QMainWindow):
         self.summary.setText(f"Steam Deck {system['model']} · SteamOS {system['os'].get('VERSION_ID', '?')}\n"
                              f"Профиль: {report['profile']} · управляемых параметров: {len(report['managed'])}\n" + '\n'.join(warnings))
         session = report.get('session')
-        if session and session.get('owner') == 'decky':
-            self.summary.setText(self.summary.text() + f"\nВременный профиль Decky: AppID {session.get('appid', '?')}. "
+        if session:
+            identity = 'AppID ' + session['appid'] if session.get('appid') else report['profile']
+            self.summary.setText(self.summary.text() + f"\nСохранённый игровой профиль: {identity}. "
                                  'Применение глобального профиля заменит это назначение.')
         for editor, game in [(self.system_editor, False), (self.game_editor, True)]:
             editor.configure(state, game)

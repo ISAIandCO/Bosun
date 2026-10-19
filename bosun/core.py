@@ -15,7 +15,7 @@ import tempfile
 import time
 from . import tweaks
 
-VERSION = '0.4.1'
+VERSION = '0.4.2'
 APP = '/home/.bosun/app'
 STATE = '/home/.bosun/state'
 BOOT = '/etc/default/grub.d/zz-bosun.cfg'
@@ -710,7 +710,7 @@ class Engine:
         if change.kind != 'service' and change.current(self.sys) != value:
             raise BosunError(f'{change.path}: write did not produce the requested value; transaction retained for recovery')
 
-    def apply(self, name, settings, dry=False, automatic=False):
+    def apply(self, name, settings, dry=False, automatic=False, supersede_session=False):
         validate(settings)
         self.sys.check_device()
         if not dry:
@@ -863,6 +863,12 @@ class Engine:
                             time.sleep(0.1)
                         else:
                             raise BosunError('LAVD did not attach; kernel retained/fell back to fair scheduler')
+            if supersede_session and not any('CONFLICT ' in n for n in notes):
+                session = self.state.pop('session', None)
+                if session:
+                    # Commit retirement with the new profile. A delayed launcher exit
+                    # must never restore its old baseline or terminate a newer session.
+                    self.state['retired_sessions'] = (self.state.get('retired_sessions', []) + [session['token']])[-64:]
             self.state.update(desired=settings, profile=name, fingerprint=fingerprint,
                               boot_id=self.sys.read('/proc/sys/kernel/random/boot_id', ''), pending=None)
             self.save()

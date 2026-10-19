@@ -129,7 +129,7 @@ function Content() {
     set(selectedKey, parsed); setMessage('Параметр добавлен в черновик. Проверьте предпросмотр.');
   };
   return <>
-    <PanelSection title={`Bosun 0.4.1 · ${system.model || 'Steam Deck'}`}>
+    <PanelSection title={`Bosun 0.4.2 · ${system.model || 'Steam Deck'}`}>
       <PanelSectionRow>{game.id ? `${game.name} (${game.id})` : 'Игра не запущена'}<br />Профиль устройства: {data.report.profile}</PanelSectionRow>
       {data.report.update_pending && <PanelSectionRow>SteamOS обновилась: проверьте и явно примените глобальный профиль.</PanelSectionRow>}
       {data.power_conflicts.length > 0 && <PanelSectionRow>Power-настройки пропускаются: {data.power_conflicts.join(', ')}.</PanelSectionRow>}
