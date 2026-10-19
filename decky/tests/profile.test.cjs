@@ -35,6 +35,7 @@ async function fixture({ automatic = true, saveError = '', activationNotes = [],
     }
     if (method === 'apply_global') { state.report.desired = copy(args[1]); state.report.profile = args[0]; }
     if (method === 'set_automatic') state.config.automatic = args[0];
+    if (method === 'cpu_check') return { ok: true, data: { notes: ['CPU CHECK fixture: policy0 min/max=400000/2400000 kHz; peak=3000000 kHz', 'WARNING: hardware enforcement is NOT confirmed'] } };
     return { ok: true, data: { notes: [method === 'preview' ? 'PLAN' : 'Applied'] } };
   };
   const window = new EventTarget();
@@ -263,6 +264,21 @@ for (const built of [false, true]) {
         assert.equal(button.props.layout, 'below');
         assert.equal(button.parent.type, 'PanelSectionRow');
       }
+    } finally { await f.close(); }
+  });
+
+  test(`${target}: CPU check shows observations beside the live policies without changing the draft`, async () => {
+    const f = await fixture({ built });
+    try {
+      await f.toggle('Управлять: Предел CPU, MHz', true);
+      await f.slider('Предел CPU, MHz', 2400);
+      await f.action('Проверить CPU: лимиты и частоты (2 с)');
+      const actual = f.section('Фактическое состояние устройства');
+      const text = JSON.stringify(actual.findAllByType('div').map(n => n.children));
+      assert.ok(text.includes('CPU CHECK fixture') && text.includes('NOT confirmed'));
+      assert.equal(f.field('SliderField', 'Предел CPU, MHz').props.value, 2400);
+      assert.equal(f.calls.filter(c => c[0] === 'cpu_check').length, 1);
+      assert.equal(f.calls.filter(c => c[0] === 'save_game').length, 0);
     } finally { await f.close(); }
   });
 }

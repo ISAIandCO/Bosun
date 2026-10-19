@@ -9,7 +9,7 @@ type Settings = Record<string, string | number>;
 type Outcome = { notes: string[]; conflict?: boolean };
 type Reply<T> = { ok: boolean; data: T; error?: string };
 type State = {
-  report: { profile: string; desired: Settings; update_pending: boolean; session: unknown; system: { model: string; kernel: string; readonly: string; model_specs: { ram_mt_s: number; battery_design_wh: number; panel_max_hz: number }; runtime: Record<string, string>; cpu: Record<string, Record<string, string>> }; managed: { change: { key: string; kind: string }; last: string | null; actual: string | null; matches: boolean }[] };
+  report: { profile: string; desired: Settings; update_pending: boolean; session: unknown; system: { model: string; kernel: string; readonly: string; model_specs: { ram_mt_s: number; battery_design_wh: number; panel_max_hz: number }; runtime: Record<string, string>; cpu: Record<string, Record<string, string>> }; managed: { change: { key: string; kind: string; path?: string }; last: string | null; actual: string | null; matches: boolean }[] };
   config: { automatic: boolean; games: Record<string, { name: string; settings: Settings; resume: boolean }>; launch_options?: Record<string, LaunchBackup> };
   profiles: Record<string, Settings>; catalog: Record<string, [string, string]>; runtime_keys: string[]; power_conflicts: string[];
 };
@@ -24,6 +24,7 @@ const release = callable<[string], Reply<Outcome>>('release');
 const rollback = callable<[], Reply<Outcome>>('rollback');
 const update = callable<[], Reply<Outcome>>('update');
 const measurementTools = callable<[], Reply<Outcome>>('measurement_tools');
+const cpuCheck = callable<[], Reply<Outcome>>('cpu_check');
 const currentGame = (): Game => ({ id: String(Router.MainRunningApp?.appid || ''), name: Router.MainRunningApp?.display_name || '' });
 function unpack<T>(reply: Reply<T>): T { if (!reply.ok) throw new Error(reply.error || 'Bosun error'); return reply.data; }
 function notifyError(error: unknown) { toaster.toast({ title: 'Bosun', body: String(error), duration: 8000 }); }
@@ -63,6 +64,7 @@ function Content() {
   const [resume, setResume] = useState(true);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
+  const [cpuMessage, setCpuMessage] = useState('');
   const [key, setKey] = useState('compaction_proactiveness');
   const [value, setValue] = useState('0');
   const refresh = async () => {
@@ -119,7 +121,7 @@ function Content() {
     set(key, parsed); setMessage('Параметр добавлен в черновик. Проверьте предпросмотр.');
   };
   return <>
-    <PanelSection title={`Bosun 0.3.4 · ${system.model || 'неизвестная модель'}`}>
+    <PanelSection title={`Bosun 0.3.5 · ${system.model || 'неизвестная модель'}`}>
       <PanelSectionRow><div style={{ fontSize: 13 }}>RAM {system.model_specs.ram_mt_s} MT/s · батарея {system.model_specs.battery_design_wh} Wh · панель до {system.model_specs.panel_max_hz} Hz<br />Ядро {system.kernel}<br />CPU driver: {[...new Set(Object.values(system.cpu).map(p => p.scaling_driver))].join(', ')}<br />Профиль: {data.report.profile} · RO: {system.readonly}<br />{game.id ? `Игра: ${game.name} (${game.id})` : 'Игра не запущена'}</div></PanelSectionRow>
       {data.report.update_pending && <PanelSectionRow>SteamOS/стек обновился: проверьте глобальный профиль перед применением.</PanelSectionRow>}
       {data.power_conflicts.length > 0 && <PanelSectionRow>Конкурирующий менеджер питания: {data.power_conflicts.join(', ')}. Power-настройки будут пропущены.</PanelSectionRow>}
@@ -171,8 +173,20 @@ function Content() {
     </PanelSection>
     <PanelSection title="Фактическое состояние устройства">
       <PanelSectionRow>Последнее чтение из системы; выбранные значения в черновике сами по себе не подтверждают применение.</PanelSectionRow>
+      {Object.entries(system.cpu).map(([p, cpu]) => <PanelSectionRow key={p}><div style={{ fontSize: 13, overflowWrap: 'anywhere' }}>
+        {p.split('/').pop()} · {cpu.scaling_driver} · {cpu.scaling_governor}<br />
+        Диапазон CPUFreq: {systemValue('cpu_max_mhz', cpu.scaling_min_freq ?? null)} — {systemValue('cpu_max_mhz', cpu.scaling_max_freq ?? null)}<br />
+        Текущая ({cpu.cpuinfo_cur_freq ? 'cpuinfo_cur_freq' : 'scaling_cur_freq'}): {systemValue('cpu_max_mhz', cpu.cpuinfo_cur_freq || cpu.scaling_cur_freq || null)}
+      </div></PanelSectionRow>)}
+      <PanelSectionRow>Совпадение CPUFreq с настройкой подтверждает запись policy, но не аппаратный потолок Boost. При превышении в оверлее выполните проверку ниже.</PanelSectionRow>
+      <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => run(async () => {
+        const result = unpack(await cpuCheck());
+        setCpuMessage(result.notes.join('\n'));
+        return { ok: true, data: { notes: ['Результат проверки CPU — в блоке фактического состояния.'] } };
+      })}>Проверить CPU: лимиты и частоты (2 с)</ButtonItem></PanelSectionRow>
+      {cpuMessage && <PanelSectionRow><div style={{ fontSize: 12, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{cpuMessage}</div></PanelSectionRow>}
       {data.report.managed.map((m, i) => <PanelSectionRow key={i}>
-        <div style={{ fontSize: 13, overflowWrap: 'anywhere' }}>{labels[m.change.key] || m.change.key}: {['boot', 'zram_config'].includes(m.change.key) ? 'override сохранён; проверка эффекта после reboot' : <>ожидалось {systemValue(m.change.key, m.last)}; прочитано {systemValue(m.change.key, m.actual)} {m.matches ? '✓ совпадает' : '— расхождение'}</>}</div>
+        <div style={{ fontSize: 13, overflowWrap: 'anywhere' }}>{m.change.path?.endsWith('/scaling_min_freq') ? 'Нижняя граница CPU (связана с пределом)' : labels[m.change.key] || m.change.key}: {['boot', 'zram_config'].includes(m.change.key) ? 'override сохранён; проверка эффекта после reboot' : <>ожидалось {systemValue(m.change.key, m.last)}; прочитано {systemValue(m.change.key, m.actual)} {m.matches ? '✓ совпадает' : '— расхождение'}</>}</div>
         {!m.matches && m.change.kind === 'scalar' && <ButtonItem layout="below" disabled={busy} onClick={() => run(() => release(m.change.key))}>Оставить фактическое значение</ButtonItem>}
       </PanelSectionRow>)}
       <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => refresh().catch(notifyError)}>Обновить фактическое состояние</ButtonItem></PanelSectionRow>

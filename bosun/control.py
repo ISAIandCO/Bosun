@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 import re
+import time
 import uuid
 
 from .core import CATALOG, GLOBAL_KEYS, POWER, PROFILES, STATE, BosunError, Change, Engine, atomic, plan, validate
@@ -141,6 +142,52 @@ class Control:
                     install_package(self.system, ['mangohud'], 'mangohud'))
         return {'notes': [note, 'See docs/testing.md for per-frame logging and battery A/B measurement.']}
 
+    def cpu_check(self):
+        """Bounded observation; no writes, stress load, packages or background polling."""
+        info = self.system.info()
+        policies = self.system.glob('/sys/devices/system/cpu/cpufreq/policy[0-9]*')
+        engine = Engine(self.system)
+        notes = [f"CPU CHECK: Bosun {info['bosun']} / {info['model']} / {info['kernel']} / SteamOS {info['os'].get('VERSION_ID', '?')}",
+                 f"profile={engine.state['profile']}; game={(engine.state.get('session') or {}).get('appid', 'none')}; "
+                 f"automatic={self.config()['automatic']}; requested_cpu_max_mhz={engine.state['desired'].get('cpu_max_mhz', 'inherit')}"]
+        conflicts = self.system.power_conflicts()
+        if conflicts:
+            notes.append('SKIP power settings: ' + ', '.join(conflicts))
+        readings = {}
+        for p in policies:
+            source = next((k for k in ['cpuinfo_avg_freq', 'cpuinfo_cur_freq', 'scaling_cur_freq']
+                           if self.system.read(p + '/' + k, '').isdigit()), None)
+            readings[p] = {'source': source, 'peak': 0, 'limits': set()}
+        for sample in range(10):
+            for p, reading in readings.items():
+                reading['limits'].add(self.system.read(p + '/scaling_max_freq', '?'))
+                raw = self.system.read(p + '/' + reading['source'], '') if reading['source'] else ''
+                if raw.isdigit():
+                    reading['peak'] = max(reading['peak'], int(raw))
+            if sample < 9:
+                time.sleep(0.2)
+        for p, reading in readings.items():
+            driver = self.system.read(p + '/scaling_driver', '?')
+            floor = self.system.read(p + '/scaling_min_freq', '?')
+            ceiling = self.system.read(p + '/scaling_max_freq', '?')
+            source = reading['source'] or 'unavailable'
+            notes.append(f"{Path(p).name}: driver={driver}; governor={self.system.read(p + '/scaling_governor', '?')}; "
+                         f"EPP={self.system.read(p + '/energy_performance_preference', '?')}; "
+                         f"boost={self.system.read(p + '/boost', self.system.read('/sys/devices/system/cpu/cpufreq/boost', '?'))}")
+            notes.append(f"min/max={floor}/{ceiling} kHz; peak={reading['peak']} kHz ({source})")
+            if len(reading['limits']) > 1:
+                notes.append('WARNING: scaling_max_freq changed during observation: ' + ', '.join(sorted(reading['limits'])))
+            if ceiling.isdigit() and reading['peak'] > int(ceiling):
+                notes.append('WARNING: observed frequency exceeds policy ceiling; hardware enforcement is NOT confirmed')
+            if source == 'scaling_cur_freq':
+                notes.append('scaling_cur_freq may report a driver request, not a measured hardware clock')
+            if driver == 'acpi-cpufreq':
+                notes.append('Legacy ACPI P-states: a policy limit alone does not prove a hard boost/SMU limit')
+        if not policies:
+            notes.append('SKIP: no CPUFreq policies')
+        notes.append('Observation only (~2 s), without added load. No exceedance in this short sample is not proof of enforcement; compare under game load.')
+        return {'notes': notes}
+
     def check_launch_rollback(self):
         if self.config().get('launch_options'):
             raise BosunError('Restore Steam launch options in Decky → Bosun first (all affected Steam accounts). System journal and application retained.')
@@ -231,7 +278,9 @@ class Control:
             if session and session.get('appid') == appid and selected:
                 previous_settings = session.get('settings')
                 if previous_settings == selected['settings'] and not resume:
-                    return {'notes': ['Game profile is already active']}
+                    desired = {**session['previous']['desired'], **selected['settings']}
+                    result, conflict = engine.apply('decky-' + appid, desired)
+                    return {'notes': result, 'conflict': conflict}
                 if resume and selected.get('resume', True):
                     # One explicit resume event. Accept only a known original/reset value;
                     # never continually overwrite Steam or another power controller.

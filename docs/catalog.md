@@ -6,7 +6,7 @@
 | `boost` | 0, 1 | runtime / профиль игры | Per-game CPU boost; disabling can free APU budget, can hurt CPU-bound games. |
 | `compact_unevictable` | 0..1 | runtime / профиль игры | Allow compaction of locked pages; can introduce minor faults. |
 | `compaction_proactiveness` | 0..100 | runtime / профиль игры | Experimental background memory compaction; 0 removes proactive work but may increase fragmentation. |
-| `cpu_max_mhz` | 400..3500 | runtime / профиль игры | Per-game CPU ceiling; trades CPU throughput for APU budget. |
+| `cpu_max_mhz` | 400..3500 | runtime / профиль игры | CPUFreq policy ceiling; hardware bounds checked, min lowered only if required. Verify actual clocks under load; not a guaranteed SMU/Boost hard cap. |
 | `dirty_background_mib` | 16..512 | runtime / профиль игры | Background writeback threshold; set together with dirty_mib. |
 | `dirty_expire_centisecs` | 500..6000 | runtime / профиль игры | Age before dirty data becomes eligible for periodic writeback; 100 units = 1 second. |
 | `dirty_mib` | 32..2048 | runtime / профиль игры | Foreground writeback threshold; set together with dirty_background_mib. |

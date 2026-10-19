@@ -60,6 +60,9 @@ class Plugin:
     async def measurement_tools(self):
         return await self._call('measurement_tools')
 
+    async def cpu_check(self):
+        return await self._call('cpu_check')
+
     async def preview_launch(self, account, appid, current, options):
         return await self._call('preview_launch', account, appid, current, options)
 

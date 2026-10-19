@@ -15,7 +15,7 @@ import tempfile
 import time
 from . import tweaks
 
-VERSION = '0.3.4'
+VERSION = '0.3.5'
 APP = '/home/.bosun/app'
 STATE = '/home/.bosun/state'
 BOOT = '/etc/default/grub.d/zz-bosun.cfg'
@@ -54,7 +54,7 @@ CATALOG = {
     'epp': ('available EPP name', 'Per-game CPPC energy hint; may reduce CPU-bound FPS/lows.'),
     'boost': ('0|1', 'Per-game CPU boost; disabling can free APU budget, can hurt CPU-bound games.'),
     'smt': ('on|off', 'Experimental CPU topology; can hurt threaded games. Never forceoff.'),
-    'cpu_max_mhz': ('400..3500', 'Per-game CPU ceiling; trades CPU throughput for APU budget.'),
+    'cpu_max_mhz': ('400..3500', 'CPUFreq policy ceiling; hardware bounds checked, min lowered only if required. Verify actual clocks under load; not a guaranteed SMU/Boost hard cap.'),
     'tdp_w': ('4..15', 'Per-game APU cap in watts, NOT total battery power.'),
     'gpu_mode': ('auto|low|high', 'AMDGPU dynamic clock policy; low/high may badly redistribute budget.'),
     'nvme_scheduler': ('available scheduler', 'Experimental storage latency/throughput tradeoff.'),
@@ -195,7 +195,9 @@ class System:
                 'bios': self.read('/sys/class/dmi/id/bios_version'), 'versions': versions,
                 'fingerprint': self.fingerprint(), 'boot_id': self.read('/proc/sys/kernel/random/boot_id', ''),
                 'cpu': {p: {k: self.read(p + '/' + k) for k in ['scaling_driver', 'scaling_governor',
-                         'energy_performance_preference', 'scaling_max_freq']} for p in policies},
+                         'energy_performance_preference', 'scaling_min_freq', 'scaling_max_freq',
+                         'cpuinfo_min_freq', 'cpuinfo_max_freq', 'cpuinfo_cur_freq', 'scaling_cur_freq',
+                         'scaling_available_governors', 'boost']} for p in policies},
                 'cmdline': self.read('/proc/cmdline'), 'swap': self.read('/proc/swaps'),
                 'scx': self.read('/sys/kernel/sched_ext/state'),
                 'scx_ops': self.read('/sys/kernel/sched_ext/root/ops'),
@@ -506,11 +508,16 @@ def plan(system, settings, managed=()):
                 elif key == 'cpu_max_mhz':
                     hz = value * 1000
                     minimum = int(system.read(p + '/scaling_min_freq', '0'))
+                    hardware_min = int(system.read(p + '/cpuinfo_min_freq', str(minimum)))
                     maximum = int(system.read(p + '/cpuinfo_max_freq', '0'))
-                    if minimum <= hz <= maximum:
+                    if hardware_min <= hz <= maximum:
+                        old = managed.get('scalar:' + p + '/scaling_min_freq') if isinstance(managed, dict) else None
+                        floor = int(old['original']) if old else minimum
+                        if minimum > hz or old:
+                            add(key, p + '/scaling_min_freq', min(floor, hz))
                         add(key, p + '/scaling_max_freq', hz)
                     else:
-                        skipped.append(f'{key}: {p} requested ceiling outside [{minimum}, {maximum}] kHz')
+                        skipped.append(f'{key}: {p} requested ceiling outside hardware range [{hardware_min}, {maximum}] kHz')
                 else:
                     add(key, p + '/boost', value)
         elif key == 'smt':
@@ -606,7 +613,14 @@ def plan(system, settings, managed=()):
                 value = 'performance' if settings['governor'] == 'performance' else baseline
                 changes.append(Change('epp', p + '/energy_performance_preference', value))
     changes.sort(key=lambda c: (c.key != 'governor', c.kind == 'service'))
-    return changes, skipped
+    return changes, [note if note.startswith('SKIP ') else 'SKIP ' + note for note in skipped]
+
+
+def frequency_expansion(change, before, after):
+    if change.key != 'cpu_max_mhz' or before == after:
+        return False
+    return ((change.path.endswith('/scaling_min_freq') and int(after) < int(before)) or
+            (change.path.endswith('/scaling_max_freq') and int(after) > int(before)))
 
 
 class Engine:
@@ -644,6 +658,8 @@ class Engine:
                 return 0
             if c['kind'] == 'service':
                 return 4 if item['before'] == 'active' else 1
+            if frequency_expansion(Change(**c), c['value'], item['before']):
+                return 1
             return 2 if c['kind'] == 'file' else 3
         ordered.sort(key=recovery_order)
         # Check the whole recovery set before a governor can reset a foreign EPP.
@@ -711,11 +727,16 @@ class Engine:
             if 'zram_config' in owned:
                 owned.update({'zram_algorithm', 'zram_size_percent'})
             replay = {k: v for k, v in settings.items() if k in owned}
-        changes, notes = plan(self.sys, replay, self.state['entries'])
-        notes[:0] = dependency_notes
         fingerprint = self.sys.fingerprint()
         rebooted = self.state['boot_id'] != self.sys.read('/proc/sys/kernel/random/boot_id', '')
         updated = self.state['fingerprint'] != fingerprint
+        planning_entries = self.state['entries']
+        if rebooted or updated:
+            planning_entries = {ident: {**entry, 'original': Change(**entry['change']).current(self.sys)}
+                                if entry['change']['key'] == 'cpu_max_mhz' else entry
+                                for ident, entry in planning_entries.items()}
+        changes, notes = plan(self.sys, replay, planning_entries)
+        notes[:0] = dependency_notes
         if automatic and updated:
             return ['SteamOS/kernel changed: automatic replay paused. Open Bosun, preview and apply to accept new baseline.'], True
         desired = {c.id: c for c in changes}
@@ -733,14 +754,19 @@ class Engine:
                    if e['change']['kind'] == 'file' and e['change']['key'] == 'lavd'
                    and Change(**e['change']).current(self.sys) != e['last']}
         cpu_blocked = set()
+        frequency_blocked = set()
         if not (updated or rebooted):
             for entry in entries.values():
                 c = Change(**entry['change'])
                 if c.key in {'epp', 'governor'} and c.current(self.sys) != entry['last']:
                     if not (automatic and c.current(self.sys) == entry['original']):
                         cpu_blocked.add(str(Path(c.path).parent))
+                if c.key == 'cpu_max_mhz' and c.current(self.sys) != entry['last']:
+                    frequency_blocked.add(str(Path(c.path).parent))
             if cpu_blocked:
                 notes.append('CONFLICT CPU policy/EPP changed externally; governor and EPP retained together')
+            if frequency_blocked:
+                notes.append('CONFLICT CPU frequency bounds changed externally; minimum and maximum retained together')
         if blocked:
             notes.append('CONFLICT lavd: owned service unit changed externally; all scheduler operations retained')
         # Removing a setting is a compare-and-restore, never a guessed stock reset.
@@ -748,7 +774,7 @@ class Engine:
             if ident in desired:
                 continue
             c = Change(**entry['change'])
-            if c.key in blocked or (c.key in {'governor', 'epp'} and str(Path(c.path).parent) in cpu_blocked):
+            if c.key in blocked or (c.key in {'governor', 'epp'} and str(Path(c.path).parent) in cpu_blocked) or (c.key == 'cpu_max_mhz' and str(Path(c.path).parent) in frequency_blocked):
                 continue
             if c.key in requested or (automatic and not rebooted):
                 notes.append(f'SKIP/RETAIN {c.path}: requested setting currently unavailable; ownership retained')
@@ -768,7 +794,7 @@ class Engine:
         for ident, c in desired.items():
             current = c.current(self.sys)
             entry = entries.get(ident)
-            if c.key in blocked or (c.key in {'governor', 'epp'} and str(Path(c.path).parent) in cpu_blocked):
+            if c.key in blocked or (c.key in {'governor', 'epp'} and str(Path(c.path).parent) in cpu_blocked) or (c.key == 'cpu_max_mhz' and str(Path(c.path).parent) in frequency_blocked):
                 continue
             if entry and entry.get('identity', c.identity(self.sys)) != c.identity(self.sys):
                 notes.append(f'CONFLICT {c.path}: device identity changed; use release before applying')
@@ -800,7 +826,7 @@ class Engine:
                 actions.append((c, current, current, 'keep'))
             else:
                 notes.append(f'UNCHANGED {c.path}: already {current!r}; no ownership taken')
-        actions.sort(key=lambda action: action[0].key != 'governor')
+        actions.sort(key=lambda a: (a[0].key != 'governor', not frequency_expansion(a[0], a[1], a[2])))
         for c, before, after, action in actions:
             notes.append(f'{"PLAN" if dry else "CHANGE"} {c.key}: {c.path}: {before!r} -> {after!r} ({action})')
         if dry:

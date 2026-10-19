@@ -66,3 +66,11 @@ bosun profile-save workqueue-test --base recommended --set workqueue_power_effic
 * [AMD P-state](https://docs.kernel.org/admin-guide/pm/amd-pstate.html): режимы и EPP.
 * [Bus lock handling](https://www.kernel.org/doc/html/latest/arch/x86/buslock.html): аппаратные условия применимости split-lock handling.
 * [Official Decky template](https://github.com/SteamDeckHomebrew/decky-plugin-template), [Decky SDK](https://github.com/SteamDeckHomebrew/decky-frontend-lib), [Decky installer](https://github.com/SteamDeckHomebrew/decky-installer/blob/main/cli/install_release.sh): API и устройство установки.
+
+## CPUFreq ceiling и аппаратная частота
+
+`cpu_max_mhz` задаёт верхнюю границу CPUFreq policy для всех обнаруженных policies. Нижняя граница временно уменьшается только если она выше запрошенного потолка; исходная пара сохраняется и восстанавливается с проверкой внешних изменений. Аппаратный диапазон читается из `cpuinfo_min_freq`/`cpuinfo_max_freq`; несовместимые значения пропускаются до записи.
+
+Это не обещание аппаратного hard cap на любой SteamOS/BIOS. [CPUFreq](https://docs.kernel.org/admin-guide/pm/cpufreq.html) различает policy limits, запрос драйвера и доступные показания аппаратной частоты; [AMD P-state](https://docs.kernel.org/admin-guide/pm/amd-pstate.html) переводит policy в CPPC performance requests. При превышении в оверлее требуется наблюдение под нагрузкой с известным драйвером, Boost, min/max и другими менеджерами питания. Короткая кнопка проверки читает эти данные; она не создаёт нагрузку и не доказывает отсутствие превышений за пределами выборки.
+
+Альтернативный путь [PowerTools](https://github.com/NGnius/PowerTools/blob/main/backend/src/settings/steam_deck/cpu.rs) использует `pp_od_clk_voltage` (`p core index clock`) в общем AMDGPU manual mode. В [исходниках Van Gogh](https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/amd/pm/swsmu/smu11/vangogh_ppt.c) commit применяет также GPU limits, а CPU значения являются soft min/max. Этот интерфейс не подставляется автоматически вместо CPUFreq без проверки реального устройства и исходных общих CPU/GPU ограничений: откат к зашитым 400/3500 MHz нарушил бы сохранённый baseline. Замена пути и аппаратное устранение сообщённого превышения пока не заявляются.
