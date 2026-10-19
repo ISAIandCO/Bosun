@@ -17,6 +17,8 @@ jobs:
       - run: sudo "$(command -v python3)" -m unittest discover -s tests -v
       - name: Exercise native Desktop GUI with isolated backend
         run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libegl1 libopengl0
           python3 -m pip install PySide6-Essentials==6.9.3
           QT_QPA_PLATFORM=offscreen python3 scripts/check-gui.py
       - uses: actions/setup-node@v4
