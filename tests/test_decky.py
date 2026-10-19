@@ -42,6 +42,20 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(self.s.read('/proc/sys/kernel/nmi_watchdog'), '0')
         self.assertNotIn('session', Engine(self.s).state)
 
+    def test_editing_the_active_game_profile_applies_new_values_and_preserves_rollback(self):
+        base = self.cpu()
+        c = self.control()
+        c.apply_global('global', {'nmi_watchdog': 0})
+        c.save_game('123', 'Game', {'cpu_max_mhz': 2800})
+        c.activate('123')
+        self.assertEqual(self.s.read(base + 'scaling_max_freq'), '2800000')
+        c.save_game('123', 'Game', {'cpu_max_mhz': 2400})
+        c.activate('123')
+        self.assertEqual(self.s.read(base + 'scaling_max_freq'), '2400000')
+        c.activate('')
+        self.assertEqual(self.s.read(base + 'scaling_max_freq'), '3500000')
+        self.assertEqual(self.s.read('/proc/sys/kernel/nmi_watchdog'), '0')
+
     def test_switch_game_preserves_global_baseline(self):
         base = self.cpu()
         self.apply({'cpu_max_mhz': 3000})

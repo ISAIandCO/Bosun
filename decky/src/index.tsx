@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { ButtonItem, DropdownItem, PanelSection, PanelSectionRow, Router, SliderField, TextField, ToggleField, staticClasses } from '@decky/ui';
 import { callable, definePlugin, toaster } from '@decky/api';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Game, watchGames } from './events';
 import { LaunchBackup, LaunchPanel, restoreLaunchBackups } from './LaunchPanel';
 
@@ -31,6 +31,7 @@ async function syncGame(game: Game, resume = false) {
   const result = unpack(await activate(game.id, resume));
   if (result.conflict || result.notes.some(n => /CONFLICT|SKIP|DIVERGENCE/.test(n))) toaster.toast({ title: 'Bosun: проверьте профиль', body: result.notes.join('\n').slice(0, 700), duration: 8000 });
   window.dispatchEvent(new Event('bosun:game'));
+  return result;
 }
 const labels: Record<string, string> = {
   mitigations: 'Программные CPU mitigations', nmi_watchdog: 'NMI watchdog', zram_page_cluster: 'Swap readahead zram', mglru: 'MGLRU', thp_defrag: 'Дефрагментация THP',
@@ -49,37 +50,52 @@ function Content() {
   const [appid, setAppid] = useState(currentGame().id);
   const [name, setName] = useState(currentGame().name);
   const [draft, setDraft] = useState<Settings>({});
+  const [dirty, setDirty] = useState(false);
+  const [base, setBase] = useState('');
+  const selection = useRef('');
+  const refreshSequence = useRef(0);
   const [resume, setResume] = useState(true);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [key, setKey] = useState('compaction_proactiveness');
   const [value, setValue] = useState('0');
-  const refresh = async () => { try { setData(unpack(await getState())); setLoadError(''); } catch (e) { setLoadError(String(e)); throw e; } };
+  const refresh = async () => {
+    const sequence = ++refreshSequence.current;
+    try { const next = unpack(await getState()); if (sequence === refreshSequence.current) { setData(next); setLoadError(''); } }
+    catch (e) { if (sequence === refreshSequence.current) setLoadError(String(e)); throw e; }
+  };
   useEffect(() => {
     refresh().catch(notifyError);
     const changed = () => { setGame(currentGame()); refresh().catch(notifyError); };
     window.addEventListener('bosun:game', changed);
-    return () => window.removeEventListener('bosun:game', changed);
+    return () => { ++refreshSequence.current; window.removeEventListener('bosun:game', changed); };
   }, []);
   useEffect(() => {
     if (!data) return;
+    const target = scope === 'global' ? 'global' : 'game:' + appid;
+    if (selection.current === target && dirty) return;
+    if (selection.current !== target) { setBase(''); setMessage(''); }
+    selection.current = target;
     const saved = data.config.games[appid];
     setDraft(scope === 'global' ? { ...data.report.desired } : { ...(saved?.settings || {}) });
-    if (saved) { setName(saved.name); setResume(saved.resume); }
-  }, [data, scope, appid]);
-  const run = async (action: () => Promise<Reply<Outcome>>) => {
+    if (scope === 'game') { setName(saved?.name || (appid === game.id ? game.name : '')); setResume(saved?.resume ?? true); }
+    setDirty(false);
+  }, [data, scope, appid, dirty, game.id, game.name]);
+  const run = async (action: () => Promise<Reply<Outcome>>, commit = false) => {
     setBusy(true);
-    try { const result = unpack(await action()); setMessage(result.notes.join('\n') || 'Готово'); }
+    const target = selection.current;
+    let committed = false;
+    try { const result = unpack(await action()); setMessage(result.notes.join('\n') || 'Готово'); committed = commit && !result.conflict; }
     catch (e) { setMessage(String(e)); }
-    finally { try { await refresh(); } catch (e) { setMessage(old => old + '\n' + String(e)); } setBusy(false); }
+    finally { try { await refresh(); if (committed && selection.current === target) setDirty(false); } catch (e) { setMessage(old => old + '\n' + String(e)); } setBusy(false); }
   };
-  const set = (setting: string, next?: string | number) => setDraft(old => {
+  const set = (setting: string, next?: string | number) => { setDirty(true); setMessage(''); setDraft(old => {
     const result = { ...old }; if (next === undefined || next === '') delete result[setting]; else result[setting] = next;
     if (next === undefined && ['dirty_background_mib', 'dirty_mib'].includes(setting)) { delete result.dirty_background_mib; delete result.dirty_mib; }
     if (setting === 'epp' && next) result.governor = 'powersave';
     if (setting === 'governor' && next !== 'powersave') delete result.epp;
     return result;
-  });
+  }); };
   const choose = (setting: string, options: string[]) => <DropdownItem label={labels[setting]} selectedOption={draft[setting] ?? ''} disabled={busy}
     rgOptions={[{ data: '', label: 'Наследовать / не менять' }, ...options.map(o => ({ data: o, label: o }))]}
     onChange={o => set(setting, String(o.data))} />;
@@ -97,60 +113,74 @@ function Content() {
     set(key, parsed); setMessage('Параметр добавлен в черновик. Проверьте предпросмотр.');
   };
   return <>
-    <PanelSection title={`Bosun 0.3.2 · ${system.model || 'неизвестная модель'}`}>
+    <PanelSection title={`Bosun 0.3.3 · ${system.model || 'неизвестная модель'}`}>
       <PanelSectionRow><div style={{ fontSize: 13 }}>RAM {system.model_specs.ram_mt_s} MT/s · батарея {system.model_specs.battery_design_wh} Wh · панель до {system.model_specs.panel_max_hz} Hz<br />Ядро {system.kernel}<br />CPU driver: {[...new Set(Object.values(system.cpu).map(p => p.scaling_driver))].join(', ')}<br />Профиль: {data.report.profile} · RO: {system.readonly}<br />{game.id ? `Игра: ${game.name} (${game.id})` : 'Игра не запущена'}</div></PanelSectionRow>
       {data.report.update_pending && <PanelSectionRow>SteamOS/стек обновился: проверьте глобальный профиль перед применением.</PanelSectionRow>}
       {data.power_conflicts.length > 0 && <PanelSectionRow>Конкурирующий менеджер питания: {data.power_conflicts.join(', ')}. Power-настройки будут пропущены.</PanelSectionRow>}
-      <ToggleField label="Автоматические профили игр" checked={data.config.automatic} disabled={busy} onChange={enabled => run(async () => { const r = await automatic(enabled); unpack(r); await syncGame(currentGame()); return r; })} />
-      <ButtonItem disabled={busy} onClick={() => run(async () => { await syncGame(currentGame()); return { ok: true, data: { notes: ['Текущая игра синхронизирована'] } }; })}>Синхронизировать текущую игру</ButtonItem>
-      <DropdownItem label="Редактировать" selectedOption={scope} rgOptions={[{ data: 'game', label: 'Профиль игры' }, { data: 'global', label: 'Глобальные настройки' }]} onChange={o => setScope(String(o.data))} />
+      <ToggleField label="Автоматические профили игр" checked={data.config.automatic} disabled={busy} onChange={enabled => run(async () => {
+        const result = unpack(await automatic(enabled));
+        const applied = await syncGame(currentGame());
+        return { ok: true, data: { notes: [...result.notes, ...applied.notes], conflict: applied.conflict } };
+      })} />
+      <ButtonItem disabled={busy} onClick={() => run(async () => ({ ok: true, data: await syncGame(currentGame()) }))}>Синхронизировать текущую игру</ButtonItem>
+      <DropdownItem label="Редактировать" selectedOption={scope} disabled={busy} rgOptions={[{ data: 'game', label: 'Профиль игры' }, { data: 'global', label: 'Глобальные настройки' }]} onChange={o => setScope(String(o.data))} />
     </PanelSection>
     {scope === 'game' && <PanelSection title="Назначение игре">
-      <ButtonItem onClick={() => { setAppid(game.id); setName(game.name); }}>Выбрать запущенную игру</ButtonItem>
-      <DropdownItem label="Сохранённые игры и строки запуска" selectedOption={appid} rgOptions={savedApps.map(id => ({ data: id, label: `${data.config.games[id]?.name || 'Steam'} (${id})` }))} onChange={o => setAppid(String(o.data))} />
-      <TextField label="AppID (можно указать до запуска игры)" value={appid} onChange={e => setAppid(e.target.value)} />
-      <TextField label="Название" value={name} onChange={e => setName(e.target.value)} />
-      <ToggleField label="Один раз восстановить после сна" description="Только известные сбросы; без постоянной перезаписи настроек Steam" checked={resume} onChange={setResume} />
+      <ButtonItem disabled={busy} onClick={() => setAppid(game.id)}>Выбрать запущенную игру</ButtonItem>
+      <DropdownItem label="Сохранённые игры и строки запуска" selectedOption={appid} disabled={busy} rgOptions={savedApps.map(id => ({ data: id, label: `${data.config.games[id]?.name || 'Steam'} (${id})` }))} onChange={o => setAppid(String(o.data))} />
+      <TextField label="AppID (можно указать до запуска игры)" value={appid} disabled={busy} onChange={e => setAppid(e.target.value)} />
+      <TextField label="Название" value={name} disabled={busy} onChange={e => { setName(e.target.value); setDirty(true); }} />
+      <ToggleField label="Один раз восстановить после сна" description="Только известные сбросы; без постоянной перезаписи настроек Steam" checked={resume} disabled={busy} onChange={v => { setResume(v); setDirty(true); }} />
     </PanelSection>}
     {scope === 'game' && <LaunchPanel appid={appid} backups={data.config.launch_options || {}} refresh={refresh} />}
     <PanelSection title="Настройки профиля">
-      <DropdownItem label="Загрузить основу в черновик" selectedOption="" strDefaultLabel="Выбрать профиль" rgOptions={Object.keys(data.profiles).map(p => ({ data: p, label: p }))}
-        onChange={o => { const settings = data.profiles[String(o.data)]; setDraft(Object.fromEntries(Object.entries(settings).filter(([k]) => scope === 'global' || data.runtime_keys.includes(k)))); }} />
+      <PanelSectionRow>{dirty ? 'Есть неприменённые изменения. Предпросмотр их сохраняет; затем нажмите кнопку сохранения/применения ниже.' : 'Показаны сохранённые настройки выбранного профиля.'}</PanelSectionRow>
+      {scope === 'game' && !data.config.automatic && <PanelSectionRow>Автоматические профили выключены: сохранение назначения не применит его к игре. Включите переключатель выше для применения при запуске.</PanelSectionRow>}
+      <DropdownItem label="Загрузить основу в черновик" selectedOption={base} disabled={busy} strDefaultLabel="Выбрать профиль" rgOptions={Object.keys(data.profiles).map(p => ({ data: p, label: p }))}
+        onChange={o => { const settings = data.profiles[String(o.data)]; setBase(String(o.data)); setDirty(true); setMessage(''); setDraft(Object.fromEntries(Object.entries(settings).filter(([k]) => scope === 'global' || data.runtime_keys.includes(k)))); }} />
       {choose('governor', ['powersave', 'performance', 'schedutil'])}
       {choose('epp', ['performance', 'balance_performance', 'balance_power', 'power'])}
-      <DropdownItem label="CPU Boost" selectedOption={draft.boost ?? ''} rgOptions={[{ data: '', label: 'Наследовать' }, { data: 0, label: 'Выключить' }, { data: 1, label: 'Включить' }]} onChange={o => set('boost', o.data === '' ? undefined : Number(o.data))} />
+      <DropdownItem label="CPU Boost" selectedOption={draft.boost ?? ''} disabled={busy} rgOptions={[{ data: '', label: 'Наследовать' }, { data: 0, label: 'Выключить' }, { data: 1, label: 'Включить' }]} onChange={o => set('boost', o.data === '' ? undefined : Number(o.data))} />
       {slider('cpu_max_mhz', 400, 3500, 100, 2800)}
       {slider('tdp_w', 4, 15, 1, 10)}
       {choose('gpu_mode', ['auto', 'low', 'high'])}
       <PanelSectionRow>Задайте FPS cap и refresh штатными средствами Steam; графика и разрешение этим профилем не снижаются.</PanelSectionRow>
-    </PanelSection>
-    <PanelSection title="Отдельные и экспериментальные параметры">
-      <DropdownItem label="Параметр" selectedOption={key} rgOptions={keys.map(k => ({ data: k, label: labels[k] || k }))} onChange={o => setKey(String(o.data))} />
-      <PanelSectionRow><div style={{ fontSize: 12 }}>{data.catalog[key]?.[1]}</div></PanelSectionRow>
-      <TextField label={`Значение: ${data.catalog[key]?.[0] || ''}`} value={value} onChange={e => setValue(e.target.value)} />
-      <ButtonItem disabled={busy} onClick={add}>Добавить / заменить в черновике</ButtonItem>
-      {Object.entries(draft).map(([k, v]) => <ButtonItem key={k} disabled={busy} onClick={() => set(k, undefined)}>{labels[k] || k}: {v} · убрать</ButtonItem>)}
       <ButtonItem disabled={busy} onClick={() => run(() => preview(draft, scope === 'game'))}>Предпросмотр без изменений</ButtonItem>
       {scope === 'game' ? <>
-        <ButtonItem disabled={busy || !appid} onClick={() => run(async () => { const r = await saveGame(appid, name, draft, resume); unpack(r); if (appid === currentGame().id) await syncGame(currentGame()); return r; })}>Сохранить назначение игре</ButtonItem>
-        <ButtonItem disabled={busy || !appid} onClick={() => run(() => removeGame(appid))}>Удалить назначение</ButtonItem>
+        <ButtonItem disabled={busy || !appid} onClick={() => run(async () => {
+          const result = unpack(await saveGame(appid, name, draft, resume));
+          if (appid === currentGame().id && data.config.automatic) {
+            const applied = await syncGame(currentGame());
+            return { ok: true, data: { notes: [...result.notes, ...applied.notes], conflict: applied.conflict } };
+          }
+          return { ok: true, data: { notes: [...result.notes, data.config.automatic ? 'Назначение применится при запуске этой игры.' : 'SKIP: автоматические профили выключены; назначение сохранено без применения.'] } };
+        }, true)}>{appid === game.id && data.config.automatic ? 'Сохранить и применить к текущей игре' : 'Сохранить назначение игре'}</ButtonItem>
+        <ButtonItem disabled={busy || !appid} onClick={() => run(() => removeGame(appid), true)}>Удалить назначение</ButtonItem>
       </> : <>
-        <ButtonItem disabled={busy} onClick={() => run(() => applyGlobal('decky-global', draft))}>Применить глобально</ButtonItem>
-        <ButtonItem disabled={busy} onClick={() => run(() => applyGlobal('recommended', data.profiles.recommended))}>Применить рекомендуемый профиль</ButtonItem>
+        <ButtonItem disabled={busy} onClick={() => run(() => applyGlobal('decky-global', draft), true)}>Применить глобально</ButtonItem>
+        <ButtonItem disabled={busy} onClick={() => run(() => applyGlobal('recommended', data.profiles.recommended), true)}>Применить рекомендуемый профиль</ButtonItem>
       </>}
+      {dirty && <ButtonItem disabled={busy} onClick={() => { setBase(''); setDirty(false); }}>Сбросить черновик к сохранённому профилю</ButtonItem>}
+      {message && <PanelSectionRow><div style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 13 }}>{message}</div></PanelSectionRow>}
+    </PanelSection>
+    <PanelSection title="Отдельные и экспериментальные параметры">
+      <DropdownItem label="Параметр" selectedOption={key} disabled={busy} rgOptions={keys.map(k => ({ data: k, label: labels[k] || k }))} onChange={o => setKey(String(o.data))} />
+      <PanelSectionRow><div style={{ fontSize: 12 }}>{data.catalog[key]?.[1]}</div></PanelSectionRow>
+      <TextField label={`Значение: ${data.catalog[key]?.[0] || ''}`} value={value} disabled={busy} onChange={e => setValue(e.target.value)} />
+      <ButtonItem disabled={busy} onClick={add}>Добавить / заменить в черновике</ButtonItem>
+      {Object.entries(draft).map(([k, v]) => <ButtonItem key={k} disabled={busy} onClick={() => set(k, undefined)}>{labels[k] || k}: {v} · убрать</ButtonItem>)}
     </PanelSection>
     <PanelSection title="Состояние и обслуживание">
       {data.report.managed.map((m, i) => <PanelSectionRow key={i}>{labels[m.change.key] || m.change.key}: {['boot', 'zram_config'].includes(m.change.key) ? 'override сохранён; проверка эффекта после reboot' : String(m.actual).slice(0, 120)} {m.matches ? '✓' : '— расхождение'}{!m.matches && m.change.kind === 'scalar' && <ButtonItem disabled={busy} onClick={() => run(() => release(m.change.key))}>Оставить фактическое значение</ButtonItem>}</PanelSectionRow>)}
       <ButtonItem disabled={busy} onClick={() => run(measurementTools)}>Подготовить MangoHud для A/B-замеров</ButtonItem>
-      <ButtonItem disabled={busy} onClick={() => run(async () => { await restoreLaunchBackups(data.config.launch_options || {}); return rollback(); })}>Полный откат, включая параметры запуска Steam</ButtonItem>
+      <ButtonItem disabled={busy} onClick={() => run(async () => { await restoreLaunchBackups(data.config.launch_options || {}); return rollback(); }, true)}>Полный откат, включая параметры запуска Steam</ButtonItem>
       <ButtonItem disabled={busy} onClick={() => run(() => update())}>Обновить Bosun и плагин</ButtonItem>
       <ButtonItem disabled={busy} onClick={() => refresh().catch(notifyError)}>Обновить фактическое состояние</ButtonItem>
-      {message && <PanelSectionRow><div style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 13 }}>{message}</div></PanelSectionRow>}
     </PanelSection>
   </>;
 }
 
 export default definePlugin(() => {
-  const stop = watchGames(SteamClient, currentGame, syncGame, notifyError);
+  const stop = watchGames(SteamClient, currentGame, async (game, resume) => { await syncGame(game, resume); }, notifyError);
   return { name: 'Bosun', titleView: <div className={staticClasses.Title}>Bosun</div>, content: <Content />, icon: <span>⚓</span>, onDismount: stop };
 });
