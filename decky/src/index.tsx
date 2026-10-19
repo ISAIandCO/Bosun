@@ -10,7 +10,7 @@ type Settings = Record<string, string | number>;
 type Outcome = { notes: string[]; conflict?: boolean };
 type Reply<T> = { ok: boolean; data: T; error?: string };
 type State = {
-  report: { profile: string; desired: Settings; update_pending: boolean; session: unknown; system: { model: string; kernel: string; readonly: string; model_specs: { ram_mt_s: number; battery_design_wh: number; panel_max_hz: number }; runtime: Record<string, string>; cpu: Record<string, Record<string, string>> }; managed: { change: { key: string; kind: string; path?: string }; last: string | null; actual: string | null; matches: boolean }[] };
+  report: { cpu_recovery?: { path: string; before: string; intended: string; actual: string }[]; profile: string; desired: Settings; update_pending: boolean; session: unknown; system: { model: string; kernel: string; readonly: string; model_specs: { ram_mt_s: number; battery_design_wh: number; panel_max_hz: number }; runtime: Record<string, string>; cpu: Record<string, Record<string, string>> }; managed: { change: { key: string; kind: string; path?: string }; last: string | null; actual: string | null; matches: boolean }[] };
   config: { automatic: boolean; games: Record<string, { name: string; settings: Settings; resume: boolean }>; launch_options?: Record<string, LaunchBackup> };
   profiles: Record<string, Settings>; catalog: Record<string, [string, string]>; runtime_keys: string[]; power_conflicts: string[];
   game_profiles?: Record<string, Settings>; groups?: Record<string, string>; labels?: Record<string, string>;
@@ -27,6 +27,7 @@ const rollback = callable<[], Reply<Outcome>>('rollback');
 const update = callable<[], Reply<Outcome>>('update');
 const measurementTools = callable<[], Reply<Outcome>>('measurement_tools');
 const cpuCheck = callable<[], Reply<Outcome>>('cpu_check');
+const recoverCpu = callable<[], Reply<Outcome>>('recover_cpu');
 const currentGame = (): Game => ({ id: String(Router.MainRunningApp?.appid || ''), name: Router.MainRunningApp?.display_name || '' });
 function unpack<T>(reply: Reply<T>): T { if (!reply.ok) throw new Error(reply.error || 'Bosun error'); return reply.data; }
 function notifyError(error: unknown) { toaster.toast({ title: 'Bosun', body: String(error), duration: 8000 }); }
@@ -129,9 +130,13 @@ function Content() {
     set(selectedKey, parsed); setMessage('Параметр добавлен в черновик. Проверьте предпросмотр.');
   };
   return <>
-    <PanelSection title={`Bosun 0.4.2 · ${system.model || 'Steam Deck'}`}>
+    <PanelSection title={`Bosun 0.4.3 · ${system.model || 'Steam Deck'}`}>
       <PanelSectionRow>{game.id ? `${game.name} (${game.id})` : 'Игра не запущена'}<br />Профиль устройства: {data.report.profile}</PanelSectionRow>
       {data.report.update_pending && <PanelSectionRow>SteamOS обновилась: проверьте и явно примените глобальный профиль.</PanelSectionRow>}
+      {!!data.report.cpu_recovery?.length && <>
+        <PanelSectionRow>Прервано изменение CPU-лимитов. Следующая кнопка сохраняет копию журнала и оставляет текущие CPU min/max без записи. После разблокировки повторите применение профиля.</PanelSectionRow>
+        <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => run(recoverCpu)}>Разблокировать CPU, оставив текущие лимиты</ButtonItem></PanelSectionRow>
+      </>}
       {data.power_conflicts.length > 0 && <PanelSectionRow>Power-настройки пропускаются: {data.power_conflicts.join(', ')}.</PanelSectionRow>}
       <PanelSectionRow><DropdownItem layout="below" label="Редактировать" selectedOption={scope} disabled={busy} rgOptions={[{ data: 'game', label: 'Игра · на лету' }, { data: 'global', label: 'Устройство · глобально' }]} onChange={o => { setScope(String(o.data)); setGroup('Все'); }} /></PanelSectionRow>
       {scope === 'game' && <>
@@ -192,6 +197,10 @@ function Content() {
         {p.split('/').pop()} · {cpu.scaling_driver} · {cpu.scaling_governor}<br />
         Диапазон CPUFreq: {systemValue('cpu_max_mhz', cpu.scaling_min_freq ?? null)} — {systemValue('cpu_max_mhz', cpu.scaling_max_freq ?? null)}<br />
         Текущая ({cpu.cpuinfo_cur_freq ? 'cpuinfo_cur_freq' : 'scaling_cur_freq'}): {systemValue('cpu_max_mhz', cpu.cpuinfo_cur_freq || cpu.scaling_cur_freq || null)}
+        {cpu.scaling_available_frequencies && <><br />Доступные ступени, kHz: {cpu.scaling_available_frequencies}</>}
+      </div></PanelSectionRow>)}
+      {data.report.cpu_recovery?.map((item, i) => <PanelSectionRow key={`recovery-${i}`}><div style={{ fontSize: 12, overflowWrap: 'anywhere' }}>
+        {item.path}: до {systemValue('cpu_max_mhz', item.before)}; запрос {systemValue('cpu_max_mhz', item.intended)}; сейчас {systemValue('cpu_max_mhz', item.actual)}
       </div></PanelSectionRow>)}
       <PanelSectionRow>Совпадение CPUFreq с настройкой подтверждает запись policy, но не аппаратный потолок Boost. При превышении в оверлее выполните проверку ниже.</PanelSectionRow>
       <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => run(async () => {

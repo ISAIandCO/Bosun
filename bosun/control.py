@@ -193,6 +193,8 @@ class Control:
                          f"EPP={self.system.read(p + '/energy_performance_preference', '?')}; "
                          f"boost={self.system.read(p + '/boost', self.system.read('/sys/devices/system/cpu/cpufreq/boost', '?'))}")
             notes.append(f"min/max={floor}/{ceiling} kHz; peak={reading['peak']} kHz ({source})")
+            notes.append(f"available_kHz={self.system.read(p + '/scaling_available_frequencies', 'continuous/not exported')}; "
+                         f"related_cpus={self.system.read(p + '/related_cpus', '?')}")
             if len(reading['limits']) > 1:
                 notes.append('WARNING: scaling_max_freq changed during observation: ' + ', '.join(sorted(reading['limits'])))
             if ceiling.isdigit() and reading['peak'] > int(ceiling):
@@ -205,6 +207,11 @@ class Control:
             notes.append('SKIP: no CPUFreq policies')
         notes.append('Observation only (~2 s), without added load. No exceedance in this short sample is not proof of enforcement; compare under game load.')
         return {'notes': notes}
+
+    def recover_cpu(self):
+        engine = Engine(self.system)
+        with engine.locked():
+            return {'notes': engine.release_cpu_recovery()}
 
     def check_launch_rollback(self):
         if self.config().get('launch_options'):

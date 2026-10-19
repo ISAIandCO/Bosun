@@ -231,6 +231,10 @@ class Window(QMainWindow):
         box = card(body, 'Ваш Steam Deck')
         self.summary = label('Загрузка состояния…'); box.addWidget(self.summary)
         button(box, 'Обновить состояние', self.refresh)
+        self.cpu_recovery_hint = label('Прервано изменение CPU. Разблокировка сохранит копию журнала и оставит текущие CPU min/max без записи; затем повторите применение профиля.', 'caption')
+        box.addWidget(self.cpu_recovery_hint)
+        self.cpu_recovery_button = button(box, 'Разблокировать CPU, оставив текущие лимиты', lambda: self.request('recover_cpu'))
+        self.cpu_recovery_hint.hide(); self.cpu_recovery_button.hide()
         box = card(body, 'Рекомендуемый профиль')
         box.addWidget(label('Системные настройки памяти, фоновой работы и программных CPU mitigations. '
                             'Только доступные параметры; исходные значения сохраняются для отката.'))
@@ -430,6 +434,8 @@ class Window(QMainWindow):
         first = self.state is None
         self.state = state
         system = state['report']['system']; report = state['report']
+        self.cpu_recovery_hint.setVisible(bool(report.get('cpu_recovery')))
+        self.cpu_recovery_button.setVisible(bool(report.get('cpu_recovery')))
         warnings = []
         if report['update_pending']:
             warnings.append('SteamOS/ядро обновились: проверьте и явно примените глобальный профиль.')
@@ -464,6 +470,8 @@ class Window(QMainWindow):
             lines.append(f"{path.split('/')[-1]}: {cpu.get('scaling_driver')} / {cpu.get('scaling_governor')} / min {cpu.get('scaling_min_freq')} / max {cpu.get('scaling_max_freq')} kHz")
         for item in report['managed']:
             lines.append(f"{item['change']['key']}: ожидалось {str(item['last'])[:120]}; прочитано {str(item['actual'])[:120]} {'✓' if item['matches'] else '— РАСХОЖДЕНИЕ'}")
+        for item in report.get('cpu_recovery', []):
+            lines.append(f"RECOVERY {item['path']}: before={item['before']}; intended={item['intended']}; actual={item['actual']} kHz")
         self.actual.setPlainText('\n'.join(lines))
         self.notice.setText(self.last_message[:600] or 'Состояние загружено. Изменения применяются только после нажатия соответствующей кнопки.')
 

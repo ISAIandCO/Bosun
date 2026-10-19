@@ -15,7 +15,7 @@ import tempfile
 import time
 from . import tweaks
 
-VERSION = '0.4.2'
+VERSION = '0.4.3'
 APP = '/home/.bosun/app'
 STATE = '/home/.bosun/state'
 BOOT = '/etc/default/grub.d/zz-bosun.cfg'
@@ -197,7 +197,8 @@ class System:
                 'cpu': {p: {k: self.read(p + '/' + k) for k in ['scaling_driver', 'scaling_governor',
                          'energy_performance_preference', 'scaling_min_freq', 'scaling_max_freq',
                          'cpuinfo_min_freq', 'cpuinfo_max_freq', 'cpuinfo_cur_freq', 'scaling_cur_freq',
-                         'scaling_available_governors', 'boost']} for p in policies},
+                         'scaling_available_governors', 'scaling_available_frequencies', 'related_cpus',
+                         'amd_pstate_lowest_nonlinear_freq', 'boost']} for p in policies},
                 'cmdline': self.read('/proc/cmdline'), 'swap': self.read('/proc/swaps'),
                 'scx': self.read('/sys/kernel/sched_ext/state'),
                 'scx_ops': self.read('/sys/kernel/sched_ext/root/ops'),
@@ -363,7 +364,15 @@ class Change:
             with system.path(self.path).open('w') as f:
                 f.write(str(value) + '\n')
         actual = self.current(system)
-        if not system.fake and actual != value:
+        if cpu_frequency_bound(self):
+            # CPUFreq's QoS notifiers queue policy->update; write(2) completion
+            # does not imply scaling_{min,max}_freq has changed yet.
+            for _ in range(50):
+                if actual == value:
+                    break
+                time.sleep(.01)
+                actual = self.current(system)
+        if actual != value and (not system.fake or cpu_frequency_bound(self)):
             raise BosunError(f'{self.path}: requested {value!r}, read back {actual!r}')
 
 
@@ -510,6 +519,15 @@ def plan(system, settings, managed=()):
                     minimum = int(system.read(p + '/scaling_min_freq', '0'))
                     hardware_min = int(system.read(p + '/cpuinfo_min_freq', str(minimum)))
                     maximum = int(system.read(p + '/cpuinfo_max_freq', '0'))
+                    available = sorted({int(f) for f in system.read(p + '/scaling_available_frequencies', '').split() if f.isdigit() and int(f) > 0})
+                    if available:
+                        candidates = [f for f in available if hardware_min <= f <= min(hz, maximum)]
+                        if not candidates:
+                            skipped.append(f'{key}: {p} no supported frequency at or below {value} MHz; available kHz: {available}')
+                            continue
+                        hz = max(candidates)
+                        if hz != value * 1000:
+                            skipped.append(f'RESOLVE {key}: {p} requested {value} MHz -> supported {hz / 1000:g} MHz (rounded down)')
                     if hardware_min <= hz <= maximum:
                         old = managed.get('scalar:' + p + '/scaling_min_freq') if isinstance(managed, dict) else None
                         floor = int(old['original']) if old else minimum
@@ -613,7 +631,12 @@ def plan(system, settings, managed=()):
                 value = 'performance' if settings['governor'] == 'performance' else baseline
                 changes.append(Change('epp', p + '/energy_performance_preference', value))
     changes.sort(key=lambda c: (c.key != 'governor', c.kind == 'service'))
-    return changes, [note if note.startswith('SKIP ') else 'SKIP ' + note for note in skipped]
+    return changes, [note if note.startswith(('SKIP ', 'RESOLVE ')) else 'SKIP ' + note for note in skipped]
+
+
+def cpu_frequency_bound(change):
+    return change.key == 'cpu_max_mhz' and change.kind == 'scalar' and bool(re.fullmatch(
+        r'/sys/devices/system/cpu/cpufreq/policy[0-9]+/scaling_(min|max)_freq', change.path))
 
 
 def frequency_expansion(change, before, after):
@@ -662,12 +685,19 @@ class Engine:
                 return 1
             return 2 if c['kind'] == 'file' else 3
         ordered.sort(key=recovery_order)
+        # Let an already queued CPUFreq update settle before classifying recovery
+        # values. This reads only; unknown stable values remain conflicts.
+        for _ in range(50):
+            if all(not cpu_frequency_bound(Change(**item['change'])) or
+                   Change(**item['change']).current(self.sys) in (item['before'], item['change']['value']) for item in ordered):
+                break
+            time.sleep(.01)
         # Check the whole recovery set before a governor can reset a foreign EPP.
         for item in ordered:
             c = Change(**item['change'])
             current = c.current(self.sys)
             if current not in (item['before'], c.value) and not (c.kind == 'service' and current == 'failed'):
-                conflicts.append(c.path)
+                conflicts.append(f'{c.path}: before={item["before"]!r}, intended={c.value!r}, actual={current!r}')
         if conflicts:
             raise BosunError('Interrupted transaction recovery conflicts (state retained): ' + '; '.join(conflicts))
         for item in ordered:
@@ -687,6 +717,36 @@ class Engine:
         self.state = pending['state_before']
         self.save()
         return ['Recovered interrupted transaction']
+
+    def release_cpu_recovery(self):
+        """Explicit keep-current resolution, scoped to CPU bounds in a pending journal."""
+        pending = self.state.get('pending')
+        if not pending or not any(cpu_frequency_bound(Change(**w['change'])) for w in pending['writes']):
+            return ['Нет прерванного изменения CPU-лимитов.']
+        self.sys.check_device()
+        archive = self.sys.path(STATE + f'/cpu-recovery-{time.time_ns()}.json')
+        actual = {w['change']['path']: Change(**w['change']).current(self.sys) for w in pending['writes']
+                  if cpu_frequency_bound(Change(**w['change']))}
+        atomic(archive, json.dumps({'journal': self.state, 'actual_cpu_limits': actual}, indent=2))
+        # Release the linked pair in both the current and recovery snapshots.
+        # Keep every unrelated write and original value for ordinary recovery.
+        for snapshot in [self.state, pending['state_before']]:
+            snapshot['entries'] = {k: v for k, v in snapshot['entries'].items()
+                                   if not cpu_frequency_bound(Change(**v['change']))}
+            snapshot['desired'].pop('cpu_max_mhz', None)
+            session = snapshot.get('session')
+            if session:
+                session['previous']['desired'].pop('cpu_max_mhz', None)
+                session.get('settings', {}).pop('cpu_max_mhz', None)
+        pending['writes'] = [w for w in pending['writes'] if not cpu_frequency_bound(Change(**w['change']))]
+        self.save()
+        try:
+            notes = self.recover()
+        except BosunError as exc:
+            raise BosunError(f'CPU-лимиты оставлены без записи; журнал сохранён в {STATE}/{archive.name}. '
+                             f'Остался другой конфликт: {exc}') from exc
+        return [f'Копия журнала: {STATE}/{archive.name}',
+                'Текущие CPU min/max сохранены без записи. Блокировка CPU снята; повторите применение профиля.', *notes]
 
     def write(self, change, value):
         if change.path == BOOT:
@@ -906,6 +966,10 @@ class Engine:
         result = {'system': self.sys.info(), 'profile': self.state['profile'], 'desired': self.state['desired'],
                   'update_pending': self.state['fingerprint'] != self.sys.fingerprint(),
                   'transaction_pending': bool(self.state['pending']), 'session': self.state.get('session'), 'managed': []}
+        result['cpu_recovery'] = [dict(path=w['change']['path'], before=w['before'], intended=w['change']['value'],
+                                      actual=Change(**w['change']).current(self.sys))
+                                  for w in (self.state.get('pending') or {}).get('writes', [])
+                                  if cpu_frequency_bound(Change(**w['change']))]
         for entry in self.state['entries'].values():
             c = Change(**entry['change'])
             result['managed'].append({**entry, 'actual': c.current(self.sys), 'matches': c.current(self.sys) == entry['last']})

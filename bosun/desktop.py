@@ -8,7 +8,7 @@ import subprocess
 from .core import APP, BosunError, Engine
 
 METHODS = {'state', 'save_game', 'remove_game', 'automatic', 'activate', 'preview', 'apply_global',
-           'release', 'rollback', 'cpu_check', 'measurement_tools', 'save_profile', 'remove_profile'}
+           'release', 'rollback', 'cpu_check', 'recover_cpu', 'measurement_tools', 'save_profile', 'remove_profile'}
 
 
 def dispatch(control, payload):

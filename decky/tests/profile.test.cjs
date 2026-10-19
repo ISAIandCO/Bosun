@@ -10,10 +10,11 @@ const Renderer = require('react-test-renderer');
 const { act } = Renderer;
 const copy = value => JSON.parse(JSON.stringify(value));
 
-async function fixture({ automatic = true, saveError = '', activationNotes = [], built = false } = {}) {
+async function fixture({ automatic = true, saveError = '', activationNotes = [], built = false, cpuPending = false } = {}) {
   const calls = [], notices = [];
   const state = {
     report: { profile: 'stock', desired: {}, managed: [], update_pending: false, session: null,
+      cpu_recovery: cpuPending ? [{ path: '/sys/devices/system/cpu/cpufreq/policy1/scaling_max_freq', before: '2800000', intended: '1500000', actual: '1700000' }] : [],
       system: { model: 'LCD', kernel: 'fixture', readonly: 'enabled', runtime: {}, cpu: {}, model_specs: { ram_mt_s: 5500, battery_design_wh: 40, panel_max_hz: 60 } } },
     config: { automatic, games: { '456': { name: 'Other', settings: { governor: 'powersave', epp: 'balance_power' }, resume: false } }, launch_options: {} },
     profiles: { recommended: { nmi_watchdog: 0, mitigations: 'off', memlock_kb: 8192 }, 'boot-only': { mitigations: 'off' }, 'cpu-game': { governor: 'powersave', epp: 'balance_performance' } },
@@ -36,6 +37,7 @@ async function fixture({ automatic = true, saveError = '', activationNotes = [],
     if (method === 'apply_global') { state.report.desired = copy(args[1]); state.report.profile = args[0]; }
     if (method === 'set_automatic') state.config.automatic = args[0];
     if (method === 'cpu_check') return { ok: true, data: { notes: ['CPU CHECK fixture: policy0 min/max=400000/2400000 kHz; peak=3000000 kHz', 'WARNING: hardware enforcement is NOT confirmed'] } };
+    if (method === 'recover_cpu') state.report.cpu_recovery = [];
     return { ok: true, data: { notes: [method === 'preview' ? 'PLAN' : 'Applied'] } };
   };
   const window = new EventTarget();
@@ -296,6 +298,23 @@ for (const built of [false, true]) {
       await f.dropdown('Редактировать', 'global');
       assert.ok(f.field('DropdownItem', 'Параметр').props.rgOptions.some(o => o.data === 'mitigations'));
       assert.ok(f.field('DropdownItem', 'Загрузить основу в черновик').props.rgOptions.some(o => o.data === 'boot-only'));
+    } finally { await f.close(); }
+  });
+
+  test(`${target}: CPU recovery is explicit, keeps the draft and does not save or apply a profile`, async () => {
+    const f = await fixture({ built, cpuPending: true });
+    const text = 'Разблокировать CPU, оставив текущие лимиты';
+    try {
+      assert.ok(f.buttons().some(b => b.props.children === text));
+      assert.ok(f.sectionText('Фактическое состояние устройства').includes('1700 MHz'));
+      await f.toggle('Управлять: Предел CPU, MHz', true);
+      await f.slider('Предел CPU, MHz', 1500);
+      const before = f.calls.length;
+      await f.action(text);
+      assert.equal(f.calls.filter(c => c[0] === 'recover_cpu').length, 1);
+      assert.equal(f.calls.slice(before).filter(c => ['save_game', 'activate', 'apply_global'].includes(c[0])).length, 0);
+      assert.equal(f.field('SliderField', 'Предел CPU, MHz').props.value, 1500);
+      assert.ok(!f.buttons().some(b => b.props.children === text));
     } finally { await f.close(); }
   });
 

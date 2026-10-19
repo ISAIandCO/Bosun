@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Exercise real Qt widgets against the isolated backend, never live sysfs/pkexec."""
 import argparse
+import dataclasses
+import json
 from pathlib import Path
 import sys
 from unittest.mock import patch
@@ -12,7 +14,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QPushButton, QToolButton
 import test_bosun as fixtures
 from bosun.control import Control
-from bosun.core import GLOBAL_KEYS, Engine
+from bosun.core import GLOBAL_KEYS, Change, Engine
 from bosun.desktop import dispatch
 from bosun.gui import Window, theme
 
@@ -115,6 +117,25 @@ def check(screenshots):
         assert Engine(fixture.s).state['profile'] == 'recommended'
         assert 'session' not in Engine(fixture.s).state
         control.rollback(); window.loaded(control.state())
+
+        # Reproduce the supplied CPU recovery error and use the actual UI action.
+        engine = Engine(fixture.s)
+        before = json.loads(json.dumps(engine.state))
+        cpu_path = '/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq'
+        change = Change('cpu_max_mhz', cpu_path, '1500000')
+        engine.state['pending'] = {'state_before': before, 'writes': [
+            {'change': dataclasses.asdict(change), 'before': fixture.s.read(cpu_path)}]}
+        engine.save(); fixture.put(cpu_path, '1700000')
+        window.loaded(control.state()); window.nav_buttons[0].click(); app.processEvents()
+        edit('cpu_max_mhz', 1500)
+        assert window.cpu_recovery_button.isVisible()
+        click('Разблокировать CPU, оставив текущие лимиты')
+        assert not window.cpu_recovery_button.isVisible()
+        assert fixture.s.read(cpu_path) == '1700000'
+        assert not Engine(fixture.s).state['pending']
+        assert window.system_editor.settings()['cpu_max_mhz'] == 1500 and window.system_editor.dirty
+        window.system_editor.load({})
+        fixture.put(cpu_path, '3500000'); window.loaded(control.state())
 
         # Real asynchronous request path, including cancellation. Window stays responsive;
         # denied authorization must retain the editor draft and show an error.

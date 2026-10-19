@@ -207,6 +207,7 @@ def main():
     sub.add_parser('profiles')
     sub.add_parser('reconcile')
     sub.add_parser('recover')
+    sub.add_parser('recover-cpu', help='Archive pending CPU journal and keep actual CPU limits')
     sub.add_parser('broker')
     sub.add_parser('tools', help='Install missing native MangoHud for benchmark logging')
     for verb in ['apply', 'session-start']:
@@ -312,6 +313,10 @@ def main():
     if args.action == 'tools':
         from bosun.control import Control
         emit(Control(system).measurement_tools()['notes'])
+        return 0
+    if args.action == 'recover-cpu':
+        from bosun.control import Control
+        emit(Control(system).recover_cpu()['notes'])
         return 0
     with engine.locked():
         if args.action == 'recover':

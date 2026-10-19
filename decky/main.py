@@ -63,6 +63,9 @@ class Plugin:
     async def cpu_check(self):
         return await self._call('cpu_check')
 
+    async def recover_cpu(self):
+        return await self._call('recover_cpu')
+
     async def preview_launch(self, account, appid, current, options):
         return await self._call('preview_launch', account, appid, current, options)
 
