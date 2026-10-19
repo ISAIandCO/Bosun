@@ -79,6 +79,14 @@ def check(screenshots):
         assert fixture.s.read('/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq') == '2600000'
         assert ('activate', ['10', False]) in requests
         assert not window.game_editor.dirty
+        # Steam resets after startup and before exit must not require pressing Apply.
+        cpu_path = '/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq'
+        fixture.put(cpu_path, '3500000'); control.activate('10')
+        window.loaded(control.state())
+        assert fixture.s.read(cpu_path) == '2600000'
+        fixture.put(cpu_path, '3500000'); control.activate('')
+        control.activate('10'); window.loaded(control.state())
+        assert fixture.s.read(cpu_path) == '2600000'
         edit('cpu_max_mhz', 2800, game=True)
         window.game_editor.search.setText('cpu_max')
         window.loaded(control.state())

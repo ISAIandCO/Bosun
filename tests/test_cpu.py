@@ -138,15 +138,15 @@ class CpuTests(unittest.TestCase):
         c.activate('123')
         self.assertEqual(self.s.read(base + 'scaling_max_freq'), '2400000')
 
-    def test_same_game_does_not_report_success_after_an_external_limit_change(self):
+    def test_same_game_profile_reclaims_its_limit_after_a_steam_reset(self):
         base = self.cpu()
         c = Control(self.s)
         c.save_game('123', 'Game', {'cpu_max_mhz': 2400})
         c.activate('123')
         self.put(base + 'scaling_max_freq', '3500000')
         result = c.activate('123')
-        self.assertTrue(result.get('conflict'), result)
-        self.assertEqual(self.s.read(base + 'scaling_max_freq'), '3500000')
+        self.assertFalse(result.get('conflict'), result)
+        self.assertEqual(self.s.read(base + 'scaling_max_freq'), '2400000')
 
     def test_cpu_check_observes_exceedance_without_writing(self):
         base = self.cpu()

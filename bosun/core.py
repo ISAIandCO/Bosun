@@ -15,7 +15,7 @@ import tempfile
 import time
 from . import tweaks
 
-VERSION = '0.4.3'
+VERSION = '0.4.4'
 APP = '/home/.bosun/app'
 STATE = '/home/.bosun/state'
 BOOT = '/etc/default/grub.d/zz-bosun.cfg'
@@ -718,8 +718,8 @@ class Engine:
         self.save()
         return ['Recovered interrupted transaction']
 
-    def release_cpu_recovery(self):
-        """Explicit keep-current resolution, scoped to CPU bounds in a pending journal."""
+    def release_cpu_recovery(self, preserve_desired=False):
+        """Archive and accept actual CPU bounds; optionally retain recipes for game replay."""
         pending = self.state.get('pending')
         if not pending or not any(cpu_frequency_bound(Change(**w['change'])) for w in pending['writes']):
             return ['Нет прерванного изменения CPU-лимитов.']
@@ -733,9 +733,10 @@ class Engine:
         for snapshot in [self.state, pending['state_before']]:
             snapshot['entries'] = {k: v for k, v in snapshot['entries'].items()
                                    if not cpu_frequency_bound(Change(**v['change']))}
-            snapshot['desired'].pop('cpu_max_mhz', None)
+            if not preserve_desired:
+                snapshot['desired'].pop('cpu_max_mhz', None)
             session = snapshot.get('session')
-            if session:
+            if session and not preserve_desired:
                 session['previous']['desired'].pop('cpu_max_mhz', None)
                 session.get('settings', {}).pop('cpu_max_mhz', None)
         pending['writes'] = [w for w in pending['writes'] if not cpu_frequency_bound(Change(**w['change']))]
@@ -746,7 +747,8 @@ class Engine:
             raise BosunError(f'CPU-лимиты оставлены без записи; журнал сохранён в {STATE}/{archive.name}. '
                              f'Остался другой конфликт: {exc}') from exc
         return [f'Копия журнала: {STATE}/{archive.name}',
-                'Текущие CPU min/max сохранены без записи. Блокировка CPU снята; повторите применение профиля.', *notes]
+                ('CPU-журнал восстановлен перед автоматическим применением профиля игры.' if preserve_desired else
+                 'Текущие CPU min/max сохранены без записи. Блокировка CPU снята; повторите применение профиля.'), *notes]
 
     def write(self, change, value):
         if change.path == BOOT:
@@ -770,7 +772,7 @@ class Engine:
         if change.kind != 'service' and change.current(self.sys) != value:
             raise BosunError(f'{change.path}: write did not produce the requested value; transaction retained for recovery')
 
-    def apply(self, name, settings, dry=False, automatic=False, supersede_session=False):
+    def apply(self, name, settings, dry=False, automatic=False, supersede_session=False, priority_keys=()):
         validate(settings)
         self.sys.check_device()
         if not dry:
@@ -790,7 +792,20 @@ class Engine:
         fingerprint = self.sys.fingerprint()
         rebooted = self.state['boot_id'] != self.sys.read('/proc/sys/kernel/random/boot_id', '')
         updated = self.state['fingerprint'] != fingerprint
-        planning_entries = self.state['entries']
+        entries = self.state['entries']
+        priority_keys = set(priority_keys) - GLOBAL_KEYS
+        if priority_keys:
+            if priority_keys.intersection({'governor', 'epp'}):
+                priority_keys.update({'governor', 'epp'})
+            entries = json.loads(json.dumps(entries))
+            for entry in entries.values():
+                change = Change(**entry['change'])
+                current = change.current(self.sys)
+                if (change.kind == 'scalar' and change.key in priority_keys and current not in (None, '') and
+                        entry.get('identity', change.identity(self.sys)) == change.identity(self.sys) and current != entry['last']):
+                    dependency_notes.append(f'PRIORITY {change.key}: {change.path}: {entry["last"]!r} -> observed {current!r}; game profile takes priority')
+                    entry['original'] = entry['last'] = current
+        planning_entries = entries
         if rebooted or updated:
             planning_entries = {ident: {**entry, 'original': Change(**entry['change']).current(self.sys)}
                                 if entry['change']['key'] == 'cpu_max_mhz' else entry
@@ -808,7 +823,6 @@ class Engine:
             requested.add('zram_config')
         if 'governor' in requested:
             requested.add('epp')
-        entries = self.state['entries']
         actions = []
         blocked = {e['change']['key'] for e in entries.values()
                    if e['change']['kind'] == 'file' and e['change']['key'] == 'lavd'
@@ -891,6 +905,7 @@ class Engine:
             notes.append(f'{"PLAN" if dry else "CHANGE"} {c.key}: {c.path}: {before!r} -> {after!r} ({action})')
         if dry:
             return notes, any('CONFLICT ' in n for n in notes)
+        self.state['entries'] = entries
         oldstate = json.loads(json.dumps(self.state))
         oldstate['pending'] = None
         governor_mutating = any(c.key == 'governor' and before != after for c, before, after, _ in actions)

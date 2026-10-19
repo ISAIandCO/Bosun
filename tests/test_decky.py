@@ -68,7 +68,7 @@ class ControlTests(unittest.TestCase):
         c.activate('')
         self.assertEqual(self.s.read(base + 'scaling_max_freq'), '3000000')
 
-    def test_known_resume_reset_and_unknown_external_change(self):
+    def test_resume_profile_has_priority_and_keeps_the_new_external_baseline(self):
         base = self.cpu()
         c = self.control()
         c.save_game('123', 'Game', {'cpu_max_mhz': 2800})
@@ -77,8 +77,9 @@ class ControlTests(unittest.TestCase):
         c.activate('123', resume=True)
         self.assertEqual(self.s.read(base + 'scaling_max_freq'), '2800000')
         self.put(base + 'scaling_max_freq', '3100000')
-        with self.assertRaises(BosunError):
-            c.activate('123', resume=True)
+        c.activate('123', resume=True)
+        self.assertEqual(self.s.read(base + 'scaling_max_freq'), '2800000')
+        c.activate('')
         self.assertEqual(self.s.read(base + 'scaling_max_freq'), '3100000')
 
     def test_resume_replay_can_be_disabled(self):
@@ -98,14 +99,14 @@ class ControlTests(unittest.TestCase):
         c.activate('999')
         self.assertEqual(self.s.read(base + 'scaling_max_freq'), '3500000')
 
-    def test_does_not_hijack_cli_session(self):
+    def test_configured_game_takes_priority_over_a_cli_session(self):
         self.cpu()
         c = self.control()
         c.save_game('123', 'Game', {'cpu_max_mhz': 2800})
         session_action(self.engine, 'session-start', 'cli', 'a' * 32, {})
-        with self.assertRaises(BosunError):
-            c.activate('123')
-        self.assertEqual(Engine(self.s).state['session']['token'], 'a' * 32)
+        c.activate('123')
+        self.assertEqual(Engine(self.s).state['session']['appid'], '123')
+        self.assertIn('a' * 32, Engine(self.s).state['retired_sessions'])
 
     def test_rejects_boot_topology_and_malformed_game_profiles(self):
         c = self.control()
@@ -137,16 +138,15 @@ class ControlTests(unittest.TestCase):
         c.activate('123')
         self.assertFalse(Engine(self.s).state['entries'])
 
-    def test_os_update_pauses_automatic_game_profile_until_explicit_apply(self):
+    def test_os_update_rechecks_and_automatically_applies_the_saved_game_profile(self):
         base = self.cpu()
         self.apply({'nmi_watchdog': 0})
         c = self.control()
         c.save_game('123', 'Game', {'cpu_max_mhz': 2800})
         self.put('/proc/sys/kernel/osrelease', 'new-kernel')
-        self.assertTrue(c.activate('123')['conflict'])
-        self.assertEqual(self.s.read(base + 'scaling_max_freq'), '3500000')
-        c.apply_global('accepted-update', {'nmi_watchdog': 0})
-        c.activate('123')
+        result = c.activate('123')
+        self.assertFalse(result.get('conflict'), result)
+        self.assertTrue(any('rechecking' in n for n in result['notes']))
         self.assertEqual(self.s.read(base + 'scaling_max_freq'), '2800000')
 
     def test_stale_session_after_reboot_does_not_block_global_apply(self):

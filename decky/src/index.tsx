@@ -130,11 +130,11 @@ function Content() {
     set(selectedKey, parsed); setMessage('Параметр добавлен в черновик. Проверьте предпросмотр.');
   };
   return <>
-    <PanelSection title={`Bosun 0.4.3 · ${system.model || 'Steam Deck'}`}>
+    <PanelSection title={`Bosun 0.4.4 · ${system.model || 'Steam Deck'}`}>
       <PanelSectionRow>{game.id ? `${game.name} (${game.id})` : 'Игра не запущена'}<br />Профиль устройства: {data.report.profile}</PanelSectionRow>
-      {data.report.update_pending && <PanelSectionRow>SteamOS обновилась: проверьте и явно примените глобальный профиль.</PanelSectionRow>}
+      {data.report.update_pending && <PanelSectionRow>SteamOS обновилась: глобальный профиль требует проверки. Профили игр проверяются при запуске автоматически.</PanelSectionRow>}
       {!!data.report.cpu_recovery?.length && <>
-        <PanelSectionRow>Прервано изменение CPU-лимитов. Следующая кнопка сохраняет копию журнала и оставляет текущие CPU min/max без записи. После разблокировки повторите применение профиля.</PanelSectionRow>
+        <PanelSectionRow>Прервано изменение CPU-лимитов. Следующая кнопка сохраняет копию журнала и оставляет текущие CPU min/max без записи. Назначенный игре CPU-профиль разрешит CPU-конфликт при запуске автоматически.</PanelSectionRow>
         <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => run(recoverCpu)}>Разблокировать CPU, оставив текущие лимиты</ButtonItem></PanelSectionRow>
       </>}
       {data.power_conflicts.length > 0 && <PanelSectionRow>Power-настройки пропускаются: {data.power_conflicts.join(', ')}.</PanelSectionRow>}

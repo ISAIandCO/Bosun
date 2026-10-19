@@ -45,3 +45,34 @@ test('unload cancels deferred events and unregisters listeners', async () => {
   const f = fixture(); await f.settle(); f.resume(); f.stop(); f.flush(); await f.settle();
   assert.equal(f.calls.length, 1); assert.equal(f.unregistered(), 2);
 });
+test('startup and plugin reload each have one bounded follow-up, never a polling loop', async () => {
+  const f = fixture(); await f.settle();
+  f.flush(); await f.settle(); f.flush(); await f.settle();
+  assert.deepEqual(f.calls, [['123', false], ['123', false]]);
+  f.set({ id: '456', name: 'Other' }); f.lifetime({ unAppID: 456, bRunning: true });
+  f.flush(); await f.settle(); f.flush(); await f.settle(); f.flush(); await f.settle();
+  assert.deepEqual(f.calls.slice(2), [['456', false], ['456', false]]); f.stop();
+});
+test('start uses lifetime AppID even when Router still reports the previous game', async () => {
+  const f = fixture(); await f.settle();
+  f.lifetime({ unAppID: 456, bRunning: true }); f.flush(); await f.settle();
+  assert.equal(f.calls.at(-1)[0], '456'); f.stop();
+});
+test('switch cancels old follow-up and ignores a delayed exit from the old game', async () => {
+  const f = fixture(); await f.settle();
+  f.lifetime({ unAppID: 456, bRunning: true }); f.flush(); await f.settle();
+  f.set({ id: '789', name: 'New' }); f.lifetime({ unAppID: 789, bRunning: true });
+  f.lifetime({ unAppID: 456, bRunning: false });
+  f.flush(); await f.settle(); f.flush(); await f.settle();
+  assert.deepEqual(f.calls, [['123', false], ['456', false], ['789', false], ['789', false]]); f.stop();
+});
+test('a queued start superseded by exit must never reapply the old game', async () => {
+  const f = fixture(); await f.settle();
+  f.set({ id: '456', name: 'Other' }); f.lifetime({ unAppID: 456, bRunning: true }); f.flush();
+  f.lifetime({ unAppID: 456, bRunning: false }); f.flush(); await f.settle();
+  assert.deepEqual(f.calls, [['123', false], ['', false]]); f.stop();
+});
+test('unload cancels startup follow-up', async () => {
+  const f = fixture(); await f.settle(); f.stop(); f.flush(); await f.settle();
+  assert.deepEqual(f.calls, [['123', false]]);
+});

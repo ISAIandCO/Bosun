@@ -7,7 +7,7 @@ import time
 import uuid
 from .presentation import LABELS, group
 
-from .core import BOOT_KEYS, CATALOG, GLOBAL_KEYS, POWER, PROFILES, STATE, BosunError, Change, Engine, atomic, plan, validate
+from .core import BOOT_KEYS, CATALOG, GLOBAL_KEYS, PROFILES, STATE, BosunError, Engine, atomic, plan, validate
 from .sessions import apply_global as apply_global_profile, session_action
 from .launch import account_key, compose
 
@@ -104,8 +104,11 @@ class Control:
             if game:
                 if REBOOT_KEYS.intersection(checked):
                     raise BosunError('Game profiles accept runtime settings only')
-                checked = {**engine.state['desired'], **checked}
-            notes, conflicts = (engine.apply('preview', checked, dry=True) if game else
+                session = engine.state.get('session') or {}
+                base = session.get('previous', {}).get('desired', engine.state['desired'])
+                priority = set(session.get('settings', {})) | set(checked)
+                checked = {**base, **checked}
+            notes, conflicts = (engine.apply('preview', checked, dry=True, priority_keys=priority) if game else
                                 apply_global_profile(engine, 'preview', checked, dry=True))
         return {'notes': notes, 'conflict': conflicts}
 
@@ -280,51 +283,45 @@ class Control:
             raise BosunError('Invalid AppID')
         engine = Engine(self.system)
         with engine.locked():
-            engine.recover()
             config = self.config()
             selected = config['games'].get(appid) if config['automatic'] else None
-            session = engine.state.get('session')
             notes = []
-            if session and session.get('owner') != 'decky':
-                if selected:
-                    raise BosunError('CLI launcher owns the active profile; use either Decky or launch options')
-                return {'notes': []}
+            try:
+                notes.extend(engine.recover())
+            except BosunError:
+                # The configured game owns its CPU limits at this event. Archive a
+                # stale CPU transaction, keep actual bounds and retry with a fresh
+                # baseline; unrelated recovery conflicts still block safely.
+                if not selected or 'cpu_max_mhz' not in selected['settings'] or not engine.report()['cpu_recovery']:
+                    raise
+                notes.extend(engine.release_cpu_recovery(preserve_desired=True))
+            session = engine.state.get('session')
             if session and engine.state['boot_id'] != self.system.read('/proc/sys/kernel/random/boot_id', ''):
                 previous = session['previous']
-                result, conflict = engine.apply(previous['profile'], previous['desired'], automatic=True)
+                result, conflict = engine.apply(previous['profile'], previous['desired'], automatic=not bool(selected), supersede_session=True)
                 notes.extend(result)
                 if conflict:
                     return {'notes': notes, 'conflict': True}
-                engine.state.pop('session', None)
-                engine.save()
                 session = None
+            if session and session.get('owner') != 'decky' and not selected:
+                return {'notes': notes}
             if selected and engine.state['fingerprint'] != self.system.fingerprint():
-                return {'notes': ['SteamOS/kernel changed: automatic game profiles paused. Preview and apply a global profile to accept the new system baseline.'], 'conflict': True}
+                notes.append('SteamOS/kernel changed: rechecking current interfaces before applying the saved game profile.')
             if session and session.get('appid') == appid and selected:
-                previous_settings = session.get('settings')
-                if previous_settings == selected['settings'] and not resume:
-                    desired = {**session['previous']['desired'], **selected['settings']}
-                    result, conflict = engine.apply('decky-' + appid, desired)
-                    return {'notes': result, 'conflict': conflict}
-                if resume and selected.get('resume', True):
-                    # One explicit resume event. Accept only a known original/reset value;
-                    # never continually overwrite Steam or another power controller.
-                    for entry in engine.state['entries'].values():
-                        change = Change(**entry['change'])
-                        if change.key in POWER and change.current(self.system) == entry['original']:
-                            entry['last'] = entry['original']
-                    desired = {**session['previous']['desired'], **selected['settings']}
-                    result, conflict = engine.apply('decky-' + appid, desired)
-                    if conflict:
-                        raise BosunError('; '.join(result))
-                    return {'notes': result}
-                if resume:
-                    return {'notes': ['Resume replay disabled for this game']}
+                if resume and not selected.get('resume', True):
+                    return {'notes': notes + ['Resume replay disabled for this game']}
+                desired = {**session['previous']['desired'], **selected['settings']}
+                priority = set(session.get('settings', {})) | set(selected['settings'])
+                result, conflict = engine.apply('decky-' + appid, desired, priority_keys=priority)
+                notes.extend(result)
+                if not conflict:
+                    engine.state['session']['settings'] = selected['settings']
+                    engine.save()
+                return {'notes': notes, 'conflict': conflict}
             if session:
                 notes.extend(session_action(engine, 'session-end', 'game', session['token']))
             if selected:
                 token = uuid.uuid4().hex
-                notes.extend(session_action(engine, 'session-start', 'decky-' + appid, token, selected['settings']))
-                engine.state['session'].update(owner='decky', appid=appid, settings=selected['settings'])
-                engine.save()
+                notes.extend(session_action(engine, 'session-start', 'decky-' + appid, token,
+                                            selected['settings'], decky_appid=appid))
             return {'notes': notes}
